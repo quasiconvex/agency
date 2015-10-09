@@ -1,3 +1,3 @@
--record(agency, {name, home, agent_mod}).
+-record(agency, {mod, agent_mod}).
 -record(agent, {mod, account}).
 

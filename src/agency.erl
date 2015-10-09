@@ -8,12 +8,14 @@
 %% However, 1 <= K <= N is the intended usage.
 
 %% api
--export([spec/3,
-         agents/2,
-         agents/3,
+-export([spec/2,
+         agent/2,
          connect/2,
-         connect/3]).
+         connect/3,
+         resolve/2,
+         resolve/3]).
 
+%% atomic
 -export([obtain_identity/2,
          obtain_identity/3,
          obtain_account/2,
@@ -23,6 +25,7 @@
          unlink_identity/3,
          unlink_identity/4]).
 
+%% admin
 -export([change_sites/2,
          change_sites/3,
          lookup_sites/1,
@@ -34,6 +37,19 @@
          check_placement/1,
          check_placement/2]).
 
+%% raw
+-export([patch/2,
+         patch/3,
+         relay/3,
+         relay/4]).
+
+%% tasks
+-export([micromanage/4,
+         micromanage/5,
+         do_transfer_identity/2,
+         do_control_sites/2,
+         do_ensure_sites/2]).
+
 %% loom
 -behavior(loom).
 -export([home/1,
@@ -42,166 +58,240 @@
          init/1,
          write_through/3,
          handle_message/4,
-         motion_decided/4]).
+         motion_decided/4,
+         task_completed/4,
+         task_continued/5]).
+
+-export([callback/3,
+         callback/4]).
+
+-callback home(#agency{}) -> loom:home().
 
 %% api
 
-spec(Name, Home, AgentMod) ->
-    #agency{name=Name, home=Home, agent_mod=AgentMod}.
+spec(Mod, AgentMod) ->
+    #agency{mod=Mod, agent_mod=AgentMod}.
 
-agents(Spec, Identity) ->
-    agents(Spec, Identity, []).
+agent(#{spec := Agency}, Account) ->
+    agent(Agency, Account);
+agent(#agency{agent_mod=AgentMod}, Account) ->
+    agent:spec(AgentMod, Account).
 
-agents(Spec, Identity, Opts) ->
-    case obtain_identity(Spec, Identity, Opts) of
+connect(Agency, Identity) ->
+    connect(Agency, Identity, []).
+
+connect(Agency, Identity, Opts) ->
+    %% if the identity actually maps to a different account than we thought, its ok
+    %% we can still connect to the old account:
+    %%  when the agents for the new account take over, they must notify the old agents
+    %%  eventually the old account will have a message indicating it was unlinked
+    %%  when the agent is in an unlinked state, it refuses / closes client connections
+    %%  when the client sees this, it forgets cached info, and tries to reconnect
+    Message =
+        util:update(#{
+                       type => conn,
+                       from => self(),
+                       as => Identity
+                     }, util:select(Opts, [since])),
+    case relay(Agency, {identity, Identity}, Message, Opts) of
+        {Node, Spec, ok} ->
+            {ok, {Node, Spec}};
+        {_, _, Error} ->
+            Error
+    end.
+
+resolve(Agency, Identity) ->
+    resolve(Agency, Identity, []).
+
+resolve(Agency, Identity, Opts) ->
+    case obtain_identity(Agency, Identity, Opts) of
         {ok, [Account|_]} ->
-            case obtain_account(Spec, Account, Opts) of
+            case obtain_account(Agency, Account, Opts) of
                 {ok, Nodes} ->
                     {ok, {Account, Nodes}};
                 {error, Reason} ->
-                    {error, Reason}
+                    {error, {account, Account, Reason}}
             end;
         {ok, []} ->
-            {error, no_account};
+            {error, {identity, Identity, no_account}};
         {error, Reason} ->
-            {error, Reason}
+            {error, {identity, Identity, Reason}}
     end.
 
-connect(Spec, Which) ->
-    connect(Spec, Which, []).
+obtain_identity(Agency, Identity) ->
+    obtain_identity(Agency, Identity, []).
 
-connect(Spec, Identity, Opts) when is_binary(Identity) ->
-    case agents(Spec, Identity, Opts) of
-        {ok, Agents} ->
-            connect(Spec, Agents, Opts);
-        {error, Reason} ->
-            {error, Reason}
+obtain_identity(Agency, Identity, Opts) when is_binary(Identity) ->
+    patch(Agency, #{
+            type => command,
+            verb => obtain,
+            path => [identities, Identity]
+           }, Opts).
+
+obtain_account(Agency, Account) ->
+    obtain_account(Agency, Account, []).
+
+obtain_account(Agency, Account, Opts) when is_binary(Account) ->
+    patch(Agency, #{
+            type => command,
+            verb => obtain,
+            path => [accounts, Account]
+           }, Opts).
+
+link_identity(Agency, Identity, Account) ->
+    link_identity(Agency, Identity, Account, []).
+
+link_identity(Agency, Identity, Account, Opts) when is_binary(Identity), is_binary(Account) ->
+    patch(Agency, #{
+            type => tether,
+            verb => accrue,
+            path => [identities, Identity],
+            value => {push, Account}
+           }, Opts).
+
+unlink_identity(Agency, Identity, Account) ->
+    unlink_identity(Agency, Identity, Account, []).
+
+unlink_identity(Agency, Identity, Account, Opts) when is_binary(Identity), is_binary(Account) ->
+    patch(Agency, #{
+            type => tether,
+            verb => accrue,
+            path => [identities, Identity],
+            value => {drop, Account}
+           }, Opts).
+
+change_sites(Agency, Change) ->
+    change_sites(Agency, Change, []).
+
+change_sites(Agency, Change, Opts) ->
+    patch(Agency, #{
+            type => tether,
+            verb => accrue,
+            path => sites,
+            value => Change
+           }, Opts).
+
+lookup_sites(Agency) ->
+    lookup_sites(Agency, []).
+
+lookup_sites(Agency, Opts) ->
+    patch(Agency, #{
+            type => command,
+            kind => chain,
+            verb => lookup,
+            path => sites
+           }, Opts).
+
+set_sites_per_account(Agency, K) ->
+    set_sites_per_account(Agency, K, []).
+
+set_sites_per_account(Agency, K, Opts) ->
+    patch(Agency, #{
+            type => tether,
+            kind => chain,
+            verb => accrue,
+            path => sites_per_account,
+            value => {'=', K}
+           }, Opts).
+
+get_sites_per_account(Agency) ->
+    get_sites_per_account(Agency, []).
+
+get_sites_per_account(Agency, Opts) ->
+    patch(Agency, #{
+            type => command,
+            kind => chain,
+            verb => lookup,
+            path => sites_per_account
+           }, Opts).
+
+check_placement(Agency) ->
+    check_placement(Agency, []).
+
+check_placement(Agency, Opts) ->
+    patch(Agency, #{
+            type => command,
+            verb => lookup,
+            path => placement
+           }, Opts).
+
+patch(Agency, Message) ->
+    patch(Agency, Message, []).
+
+patch(Agency, Message, Opts) ->
+    loom:dispatch(Agency, Message, util:ifndef(Opts, wrapped, false)).
+
+relay(Agency, Agentish, Message) ->
+    relay(Agency, Agentish, Message, []).
+
+relay(Agency, {identity, Identity}, Message, Opts) ->
+    case obtain_identity(Agency, Identity, #{wrapped => true}) of
+        {Node, _, {ok, [Account|_]}} ->
+            relay(Agency, {account, Account}, Message, util:set(Opts, pref, Node));
+        {Node, Agency, {error, Reason}} ->
+            {Node, Agency, {error, {identity, Identity, Reason}}}
     end;
-connect(_, {_, []}, _) ->
-    {error, failed};
-connect(Spec, {Account, Nodes}, Opts) when is_list(Nodes) ->
-    Node = util:random(Nodes),
-    case connect(Spec, {Account, Node}, Opts) of
-        {ok, Node} ->
-            {ok, Node};
-        _ ->
-            connect(Spec, {Account, util:delete(Nodes, Node)}, Opts)
+relay(Agency, {account, Account}, Message, Opts) ->
+    %% ensure that a delegate from the account eventually accomplishes some task
+    case obtain_account(Agency, Account, #{wrapped => true}) of
+        {_, _, {ok, [_|_] = Nodes}} ->
+            loom:deliver(Nodes, agent(Agency, Account), Message, Opts);
+        {Node, Agency, {ok, []}} ->
+            %% probably either K = 0 or N = 0
+            {Node, Agency, {error, {account, Account, no_sites}}};
+        {Node, Agency, {error, Reason}} ->
+            {Node, Agency, {error, {account, Account, Reason}}}
     end;
-connect(Spec, {Account, Node}, Opts) ->
-    rpc(Node, agent_spec(Spec, Account), #{type => conn, from => self()}, Opts).
+relay(_, Agent, Message, Opts) ->
+    loom:dispatch(Agent, Message, Opts).
 
-obtain_identity(Spec, Identity) ->
-    obtain_identity(Spec, Identity, []).
+%% task api
 
-obtain_identity(Spec, Identity, Opts) ->
-    call(Spec, #{
-           type => command,
-           verb => obtain,
-           path => [identities, Identity]
-          }, Opts).
+micromanage(Agency, Agentish, Path, Value) ->
+    micromanage(Agency, Agentish, Path, Value, []).
 
-obtain_account(Spec, Account) ->
-    obtain_account(Spec, Account, []).
-
-obtain_account(Spec, Account, Opts) ->
-    call(Spec, #{
-           type => command,
-           verb => obtain,
-           path => [accounts, Account]
-          }, Opts).
-
-link_identity(Spec, Identity, Account) ->
-    link_identity(Spec, Identity, Account, []).
-
-link_identity(Spec, Identity, Account, Opts) ->
-    call(Spec, #{
-           type => tether,
-           verb => accrue,
-           path => [identities, Identity],
-           value => {cons, Account}
-          }, Opts).
-
-unlink_identity(Spec, Identity, Account) ->
-    unlink_identity(Spec, Identity, Account, []).
-
-unlink_identity(Spec, Identity, Account, Opts) ->
-    call(Spec, #{
-           type => tether,
-           verb => accrue,
-           path => [identities, Identity],
-           value => {tail, Account}
-          }, Opts).
-
-change_sites(Spec, Change) ->
-    change_sites(Spec, Change, []).
-
-change_sites(Spec, Change, Opts) ->
-    call(Spec, #{
-           type => tether,
-           verb => accrue,
-           path => sites,
-           value => Change
-          }, Opts).
-
-lookup_sites(Spec) ->
-    lookup_sites(Spec, []).
-
-lookup_sites(Spec, Opts) ->
-    call(Spec, #{
-           type => command,
-           kind => chain,
-           verb => lookup,
-           path => sites
-          }, Opts).
-
-set_sites_per_account(Spec, K) ->
-    set_sites_per_account(Spec, K, []).
-
-set_sites_per_account(Spec, K, Opts) ->
-    call(Spec, #{
-           type => tether,
-           kind => chain,
-           verb => accrue,
-           path => sites_per_account,
-           value => {'=', K}
-          }, Opts).
-
-get_sites_per_account(Spec) ->
-    get_sites_per_account(Spec, []).
-
-get_sites_per_account(Spec, Opts) ->
-    call(Spec, #{
-           type => command,
-           kind => chain,
-           verb => lookup,
-           path => sites_per_account
-          }, Opts).
-
-check_placement(Spec) ->
-    check_placement(Spec, []).
-
-check_placement(Spec, Opts) ->
-    call(Spec, #{
-           type => command,
-           verb => lookup,
-           path => placement
-          }, Opts).
-
-call(Spec, Message, Opts) ->
-    loom:call(Spec, Message, util:get(Opts, timeout, 5000)).
-
-rpc(Node, Spec, Message, Opts) ->
-    loom:rpc(Node, Spec, Message, util:get(Opts, timeout, 30000)).
+micromanage(Agency, Agentish, Path, Value, Opts) ->
+    %% probe the path first to prevent duplicating requests
+    %% then wait, modify, or retry as needed
+    Probe = #{
+      type => command,
+      kind => probe,
+      verb => lookup,
+      path => Path
+     },
+    case relay(Agency, Agentish, Probe, Opts) of
+        {undefined, Agent, _} ->
+            %% agent could not be contacted
+            {retry, {10, seconds}, {undeliverable, {probe, Agent}}};
+        {Node, _, {wait, Reason}} ->
+            %% a change is pending
+            {retry, {10, seconds}, {wait, {Node, Reason}}};
+        {_, _, {ok, Value}} ->
+            %% the value has already been set, all done
+            {done, ok};
+        {Node, Agent, {ok, _}} ->
+            %% the value hasn't even begun to change, try sending
+            Modify = #{
+              type => tether,
+              verb => modify,
+              path => Path,
+              value => Value
+             },
+            case loom:rpc(Node, Agent, Modify) of
+                {ok, Value} ->
+                    {done, ok};
+                Response ->
+                    {retry, {10, seconds}, {wait, {Node, Response}}}
+            end
+    end.
 
 %% loom
 
-home(#agency{home=Home}) when is_function(Home) ->
-    Home();
-home(#agency{home=Home}) ->
-    Home.
+proc(#agency{mod=Mod} = Spec) ->
+    callback(Spec, {proc, 1}, [Spec], fun () -> erloom_registry:proc(Mod, Spec) end).
 
-proc(#agency{name=Name} = Spec) ->
-    erloom_registry:proc(Name, Spec).
+home(Spec) ->
+    callback(Spec, {home, 1}, [Spec]).
 
 keep(State) ->
     %% XXX these should be lmdbs or dets tables or something
@@ -225,27 +315,27 @@ write_through(_, _, _State) ->
 
 handle_message(#{verb := obtain, path := [identities, Identity]}, _, true, State) ->
     case erloom_chain:value(State, [identities, Identity]) of
-        undefined ->
+        A when A =:= undefined; A =:= [] ->
             %% information will be propagated through the chain motion itself
             %% we dont need yet another emit, unless we want to choose the value later
             Account = create_account(Identity),
             Message = #{
               verb => accrue,
               path => [identities, Identity],
-              value => {'=', [Account]}
+              value => {push, Account}
              },
-            loom:maybe_chain(Message, State);
+            loom:make_tether(Message, State);
         Account ->
-            loom:maybe_reply({ok, Account}, State)
+            State#{response => {ok, Account}}
     end;
 
 handle_message(#{verb := obtain, path := [accounts, Account]}, _, true, State) ->
     case erloom_chain:value(State, [accounts, Account]) of
         undefined ->
             %% get permission to change first, then choose the value and emit
-            loom:maybe_chain(#{verb => create, path => [accounts, Account]}, State);
+            loom:make_tether(#{verb => create, path => [accounts, Account]}, State);
         Nodes ->
-            loom:maybe_reply({ok, Nodes}, State)
+            State#{response => {ok, Nodes}}
     end;
 
 handle_message(#{verb := accrue, path := [accounts, Account]}, Node, _, State) ->
@@ -253,30 +343,45 @@ handle_message(#{verb := accrue, path := [accounts, Account]}, Node, _, State) -
     %% update the sites count: increment every added node, decrement every removed node
     Former = util:get(State, former),
     Latter = erloom_chain:lookup(State, [accounts, Account]),
-    Task = {fun do_control_sites/2, {Account, Former, Latter}},
+    Task = {fun ?MODULE:do_control_sites/2, {Account, Former, Latter}},
     State1 = update_placement(util:diff(util:def(element(1, Former), []),
                                         util:def(element(1, Latter), [])), State),
-    State2 = loom:stitch_task({ctrl, Account}, Node, Task, State1),
-    loom:maybe_reply(State2);
+    loom:stitch_task({sites, Account}, Node, Task, State1);
 
 handle_message(_Message, _Node, _IsNew, State) ->
-    loom:maybe_reply(State).
+    State.
 
 motion_decided(#{verb := accrue, path := sites}, Mover, {true, _}, State) ->
     %% make sure all accounts are updated to reflect the change, if needed
     %% NB: if we kept accounts per node, we wouldn't have to check *all* accounts
-    Task = {fun do_ensure_sites/2, {all}},
+    Task = {fun ?MODULE:do_ensure_sites/2, {all}},
     State1 =
         util:modify(State, placement,
                     fun (Placement) ->
                             util:update(util:mapped(sites(State), 0), Placement)
                     end),
-    loom:stitch_task({change, sites}, Mover, Task, State1);
+    loom:suture_task({change, sites}, Mover, Task, State1);
 
 motion_decided(#{verb := accrue, path := sites_per_account}, Mover, {true, _}, State) ->
     %% make sure all accounts are updated to reflect the change, if needed
-    Task = {fun do_ensure_sites/2, {all}},
-    loom:stitch_task({change, sites}, Mover, Task, State);
+    Task = {fun ?MODULE:do_ensure_sites/2, {all}},
+    loom:suture_task({change, sites}, Mover, Task, State);
+
+motion_decided(#{verb := accrue, path := [identities, Identity], value := Change}, Node, _, State) ->
+    %% an identity was linked / unlinked to an account
+    Transfer =
+        case {Change, erloom_chain:value(State, [identities, Identity])} of
+            {{push, New}, [New]} ->
+                {undefined, New};
+            {{push, New}, [New, Old|_]} ->
+                {Old, New};
+            {{drop, Old}, []} ->
+                {Old, undefined};
+            {{drop, Old}, [New|_]} ->
+                {Old, New}
+        end,
+    Task = {fun ?MODULE:do_transfer_identity/2, {Identity, Transfer}},
+    loom:suture_task({ident, Identity}, Node, Task, State);
 
 motion_decided(#{verb := create, path := [accounts, Account]}, Mover, {true, _}, State) when Mover =:= node() ->
     %% choose nodes for the account, emit a command to communicate the result
@@ -294,15 +399,48 @@ motion_decided(#{verb := create, path := [accounts, Account]}, Mover, {true, _},
 motion_decided(_Motion, _Mover, _Decision, State) ->
     State.
 
-%% helpers
+task_completed(Message, Node, Result, State) ->
+    callback(State, {task_completed, 4}, [Message, Node, Result, State], State).
 
-agent_spec(#{spec := Spec}, Account) ->
-    agent_spec(Spec, Account);
-agent_spec(#agency{agent_mod=AgentMod}, Account) ->
-    agent:spec(AgentMod, Account).
+task_continued(Name, Reason, Clock, Arg, State) ->
+    callback(State, {task_continued, 5}, [Name, Reason, Clock, Arg, State], ok).
+
+callback(#{spec := Spec}, FA, Args) ->
+    callback(Spec, FA, Args);
+callback(#agency{mod=Mod}, FA, Args) ->
+    loom:callback(Mod, FA, Args).
+
+callback(#{spec := Spec}, FA, Args, Default) ->
+    callback(Spec, FA, Args, Default);
+callback(#agency{mod=Mod}, FA, Args, Default) ->
+    loom:callback(Mod, FA, Args, Default).
+
+%% helpers
 
 create_account(Identity) when is_binary(Identity) ->
     util:bin([base64url:encode(Identity), "-", time:stamp(time:unow(), tai64)]).
+
+%% identity management
+
+do_transfer_identity({Identity, {Old, undefined}}, State) ->
+    %% just revoke the control from the old account, since there is no new one
+    micromanage(State, {account, Old}, [identities, Identity], false);
+do_transfer_identity({Identity, {undefined, New}}, State) ->
+    %% just give control to the new account, since there is no old one
+    micromanage(State, {account, New}, [identities, Identity], true);
+do_transfer_identity({Identity, {Old, New}}, State) ->
+    %% transfer control of the identity to the new account from the old one, if any
+    %% the new account relieves the old one of duty, and copies anything it needs
+    %% during the transition period they might both think they own the identity, which is fine
+    %% the agency only points to one of them (who knows how long it takes for them to find out)
+    case micromanage(State, {account, New}, [identities, Identity], true) of
+        {done, _} ->
+            micromanage(State, {account, Old}, [identities, Identity], false);
+        Other ->
+            Other
+    end.
+
+%% sites and placement
 
 sites(State) ->
     erloom_chain:value(State, sites).
@@ -325,26 +463,28 @@ choose_sites(Account, Existing, State) ->
     choose_sites(Account, Existing, sites_per_account(State), State).
 
 choose_sites(Account, Existing, K, State) ->
-    choose_sites(Account, Existing, length(Existing), K, select_placement(State)).
+    Remaining = util:select(Existing, sites(State)),
+    Placement = select_placement(State),
+    choose_sites(Account, Remaining, length(Remaining), K, Placement).
 
-choose_sites(_, Existing, E, K, Placement) when E < K ->
+choose_sites(_, Remaining, R, K, Placement) when R < K ->
     %% choose nodes to add
     %% rank the sites by size (the smaller the better)
     %% NB: we may return less than K
     Prefs = maps:fold(fun (Node, Size, Acc) ->
                               [{Size, Node}|Acc]
-                      end, [], util:except(Placement, Existing)),
-    lists:sublist(util:vals(lists:keysort(1, Prefs)), K - E) ++ Existing;
-choose_sites(_, Existing, E, K, Placement) when E > K ->
+                      end, [], util:except(Placement, Remaining)),
+    lists:sublist(util:vals(lists:keysort(1, Prefs)), K - R) ++ Remaining;
+choose_sites(_, Remaining, R, K, Placement) when R > K ->
     %% choose nodes to drop
     %% rank the sites by size (the bigger the better)
     Prefs = maps:fold(fun (Node, Size, Acc) ->
                               [{-Size, Node}|Acc]
-                      end, [], util:select(Placement, Existing)),
-    Existing -- lists:sublist(util:vals(lists:keysort(1, Prefs)), E - K);
-choose_sites(_, Existing, _, _, _) ->
+                      end, [], util:select(Placement, Remaining)),
+    Remaining -- lists:sublist(util:vals(lists:keysort(1, Prefs)), R - K);
+choose_sites(_, Remaining, _, _, _) ->
     %% nothing to add or drop
-    Existing.
+    Remaining.
 
 do_ensure_sites({all}, State) ->
     %% go through every account, check that it has the right number of sites
@@ -367,7 +507,7 @@ do_ensure_sites({all}, State) ->
                             path => [accounts, Account],
                             value => {'=', Nodes1}
                            },
-                          {ok, _} = loom:call(S, Command, 10000),
+                          {ok, _} = loom:call(S, Command),
                           update_placement(util:diff(Nodes, Nodes1), S)
                   end;
               ({_, _}, S) ->
@@ -375,34 +515,49 @@ do_ensure_sites({all}, State) ->
                   %% XXX: we must keep retrying until we are sure about all accounts
                   S
           end, State, util:get(State, accounts)),
-    {done, ok}.
+    {done, all}.
 
-do_control_sites({Account, {Old, _}, {[First|_] = New, _}}, State) when Old =:= undefined; Old =:= [] ->
+do_control_sites({Account, {Old, _}, {[_|_] = New, _}}, State) when Old =:= undefined; Old =:= [] ->
     %% we can stop as soon as the agent acknowledges the message
     %% the start message will keep trying to seed until it succeeds
-    %% we always seed the same node on retry, which guarantees its idempotence
-    Start = #{type => start, seed => New},
-    case loom:rpc(First, agent_spec(State, Account), Start) of
-        ok ->
-            {done, ok};
-        _ ->
-            {retry, {60, seconds}}
+    %% since the root conf is symbolic, we can safely try seeding different nodes when we don't get a reply
+    case loom:deliver(New, agent(State, Account), #{type => start, seed => New}) of
+        {undefined, Agent, _} ->
+            {retry, {10, seconds}, {undeliverable, {seed, Agent}}};
+        {_, _, ok} ->
+            {done, ok}
     end;
 do_control_sites({Account, {[_|_] = Old, _}, {New, _}}, State) ->
     %% we can stop as soon as the agent accepts responsibility for the change
     %% once the motion passes it will take effect, eventually
-    Delegate = util:random(Old),
-    Start = #{type => move, kind => conf, value => {'=', New}},
-    case loom:rpc(Delegate, agent_spec(State, Account), Start) of
-        {ok, _} ->
-            {done, ok};
-        {error, stopped} ->
-            %% if an old node is stopped, the group config must have already changed
-            %% either our change was successful, or someone else interfered
-            %% in either case we are done, if someone else is interfering, its their problem
-            {done, stopped};
-        _ ->
-            {retry, {60, seconds}}
+    %% we check the new nodes to see if the value is set, and submit to the old nodes if it is not
+    case loom:deliver(New, agent(State, Account), #{type => command, verb => lookup, path => elect}) of
+        {undefined, Agent, _} ->
+            {retry, {10, seconds}, {undeliverable, {start, Agent}}};
+        {Probed, Agent, {ok, Elect = #{current := Current}}} ->
+            %% check if the current conf is what we want already
+            case util:get(Elect, Current) of
+                {_, #{value := {'=', New}}, decided} ->
+                    %% decided means accepted if its still there
+                    {done, ok};
+                {_, #{value := {'=', New}}, _} ->
+                    %% wait to see if it passes
+                    {retry, {10, seconds}, {wait, {Probed, pending}}};
+                {_, #{}, _} ->
+                    %% has another value, we ought to set it
+                    case loom:deliver(Old, Agent, #{type => move, kind => conf, value => {'=', New}}) of
+                        {_, _, {ok, _}} ->
+                            {done, ok};
+                        {_, _, {retry, stopped}} ->
+                            %% if an old node is stopped, the group config must have already changed
+                            %% either our change was successful, or someone else interfered
+                            %% in either case we are done, if someone else is interfering, its their problem
+                            {done, stopped};
+                        {Node, _, Response} ->
+                            %% either the motion is pending or it failed, either way try again
+                            {retry, {10, seconds}, {wait, {Node, Response}}}
+                    end
+            end
     end;
 do_control_sites({_, _, _}, _) ->
     %% there are no old nodes and no new ones: weird, but someone must have asked us to do it
