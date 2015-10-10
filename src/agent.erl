@@ -104,11 +104,16 @@ handle_info(Info, State) ->
     callback(State, {handle_info, 2}, [Info, State], State).
 
 handle_builtin(#{type := conn, from := From, as := Identity}, _, true, State) ->
-    %% XXX refuse conns for identities we dont manage, close conns when we lose an identity
-    link(From),
-    State1 = util:modify(State, [clients, From], Identity),
-    State2 = catchup_client(From, util:get(State1, since), State1),
-    State2#{response => ok};
+    case erloom_chain:value(State, [identities, Identity]) of
+        true ->
+            link(From),
+            State1 = util:modify(State, [clients, From], Identity),
+            State2 = catchup_client(From, util:get(State1, since), State1),
+            State2#{response => ok};
+        _ ->
+            %% we refuse conns for identities we dont manage
+            State#{response => {error, {identity, Identity}}}
+    end;
 
 handle_builtin(_Message, _Node, _IsNew, State) ->
     State.
@@ -118,6 +123,9 @@ handle_message(Message, Node, IsNew, State) ->
     State2 = forward_clients(Message, State1),
     callback(State2, {handle_message, 4}, [Message, Node, IsNew, State2], State2).
 
+motion_builtin(#{verb := modify, path := [identities, Identity], value := false}, _, {true, _}, State) ->
+    %% close conns when we stop managing an identity
+    close_clients(Identity, State);
 motion_builtin(_Motion, _Mover, _Decision, State) ->
     State.
 
@@ -150,5 +158,15 @@ forward_clients(Message, State = #{locus := Locus}) ->
       fun (Client, _Identity, S) ->
               %% XXX is this a message we want to send?
               Client ! {forward, Message, Locus},
+              S
+      end, State, util:get(State, clients, #{})).
+
+close_clients(Identity, State) ->
+    maps:fold(
+      fun (Client, I, S) when I =:= Identity ->
+              unlink(Client),
+              Client ! {closed, Identity},
+              util:delete(S, [clients, Identity]);
+          (_, _, S) ->
               S
       end, State, util:get(State, clients, #{})).
