@@ -47,6 +47,10 @@
 
 -export([create/3,
          create/4,
+         lookup/3,
+         lookup/4,
+         lookup_id/4,
+         lookup_sites/4,
          obtain/3,
          obtain/4,
          obtain_id/4,
@@ -145,6 +149,40 @@ create(Manager, SubType, SubName, Opts) ->
         {error, Reason} ->
             {error, {{name, SubType, SubName}, Reason}}
     end.
+
+lookup(Manager, SubType, SubName) ->
+    lookup(Manager, SubType, SubName, []).
+
+lookup(Manager, SubType, SubName, Opts) ->
+    case lookup_id(Manager, SubType, SubName, Opts) of
+        {ok, {false, [SubId|_]}} ->
+            case lookup_sites(Manager, SubType, SubId, Opts) of
+                {ok, {false, Nodes}} ->
+                    {ok, {SubId, Nodes}};
+                {error, Reason} ->
+                    {error, {{id, SubType, SubId}, Reason}}
+            end;
+        {ok, {false, EmptyOrUndef}} ->
+            {ok, {EmptyOrUndef, undefined}};
+        {error, Reason} ->
+            {error, {{name, SubType, SubName}, Reason}}
+    end.
+
+lookup_id(Manager, SubType, SubName, Opts) ->
+    patch(Manager, #{
+            type => command,
+            kind => chain,
+            verb => lookup,
+            path => [sub_names, SubType, SubName]
+           }, Opts).
+
+lookup_sites(Manager, SubType, SubId, Opts) ->
+    patch(Manager, #{
+            type => command,
+            kind => chain,
+            verb => lookup,
+            path => [sub_sites, SubType, SubId]
+           }, Opts).
 
 obtain(Manager, SubType, SubName) ->
     obtain(Manager, SubType, SubName, []).
@@ -313,26 +351,38 @@ relay(Manager, Subish, Message) ->
 relay(#{spec := Spec}, Subish, Message, Opts) ->
     relay(Spec, Subish, Message, Opts);
 relay(Manager, {name, SubType, SubName}, Message, Opts) ->
-    case obtain_id(Manager, SubType, SubName, #{wrapped => true}) of
-        {Node, _, {ok, {_, [SubId|_]}}} ->
-            relay(Manager, {id, SubType, SubId}, Message, util:set(Opts, pref, Node));
-        {Node, Manager, {error, Reason}} ->
-            {Node, Manager, {error, {{name, SubType, SubName}, Reason}}}
+    case util:lookup(Opts, [cached, id]) of
+        undefined ->
+            case obtain_id(Manager, SubType, SubName, #{wrapped => true}) of
+                {Node, _, {ok, {_, [SubId|_]}}} ->
+                    relay(Manager, {id, SubType, SubId}, Message, util:set(Opts, pref, Node));
+                {Node, Manager, {error, Reason}} ->
+                    {Node, Manager, {error, {{name, SubType, SubName}, Reason}}}
+            end;
+        SubId ->
+            relay(Manager, {id, SubType, SubId}, Message, Opts)
     end;
 relay(Manager, {id, SubType, SubId}, Message, Opts) ->
-    case obtain_sites(Manager, SubType, SubId, #{wrapped => true}) of
-        {_, _, {ok, {_, [_|_] = Nodes}}} ->
-            %% we know the nodes, so we can deliver directly instead of dispatch
-            loom:deliver(Nodes, subordinate_spec(Manager, [SubType, SubId]), Message, Opts);
-        {Node, Manager, {ok, {_, []}}} ->
-            %% no nodes is an error: probably either K = 0 or N = 0
-            {Node, Manager, {error, {{id, SubType, SubId}, no_sites}}};
-        {Node, Manager, {error, Reason}} ->
-            %% something else went wrong
-            {Node, Manager, {error, {{id, SubType, SubId}, Reason}}}
+    SubSpec = subordinate_spec(Manager, [SubType, SubId]),
+    SubOpts = util:get(Opts, relay, []),
+    case util:lookup(Opts, [cached, sites]) of
+        undefined ->
+            case obtain_sites(Manager, SubType, SubId, #{wrapped => true, pref => util:get(Opts, pref)}) of
+                {_, _, {ok, {_, [_|_] = Nodes}}} ->
+                    %% we know the nodes, so we can deliver directly instead of dispatch
+                    loom:deliver(Nodes, SubSpec, Message, SubOpts);
+                {Node, Manager, {ok, {_, []}}} ->
+                    %% no nodes is an error: probably either K = 0 or N = 0
+                    {Node, Manager, {error, {{id, SubType, SubId}, no_sites}}};
+                {Node, Manager, {error, Reason}} ->
+                    %% something else went wrong
+                    {Node, Manager, {error, {{id, SubType, SubId}, Reason}}}
+            end;
+        Nodes ->
+            loom:deliver(Nodes, SubSpec, Message, SubOpts)
     end;
 relay(_, SubSpec, Message, Opts) ->
-    loom:dispatch(SubSpec, Message, Opts).
+    loom:dispatch(SubSpec, Message, util:get(Opts, relay, [])).
 
 micromanage(Manager, Subish, Path, Value) ->
     micromanage(Manager, Subish, Path, Value, []).

@@ -6,11 +6,11 @@
          home/1,
          handle_message/4]).
 
-spec(Agency, Account) ->
-    #agent{mod=?MODULE, agency=Agency, account=Account}.
+spec(Agency, AgentId) ->
+    #agent{mod=?MODULE, agency=Agency, id=AgentId}.
 
-home(#agent{account=Account}) ->
-    filename:join([var, url:esc(node()), ?MODULE, Account]).
+home(#agent{id=AgentId}) ->
+    filename:join([var, url:esc(node()), ?MODULE, AgentId]).
 
 handle_message(_Message, _Node, _IsNew, State) ->
     State.

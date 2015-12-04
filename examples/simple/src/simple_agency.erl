@@ -2,7 +2,7 @@
 -include_lib("agency/include/agency.hrl").
 
 -export([a/0, b/0, b2/0, c/0, d/0, e/0, f/0, f/3]).
--export([nd/1, fwd/2, ags/1, nms/1, rep/1]).
+-export([nd/1, fwd/2, ag/1, ags/1, nms/1, rep/1]).
 -export([spec/0, call/1, state/0, tasks/0]).
 
 -behavior(manager).
@@ -46,14 +46,17 @@ f(A, B, C) ->
 nd(Name) ->
     util:atom(Name ++ "@" ++ util:ok(inet:gethostname())).
 
-fwd(Identity, Message) ->
-    manager:relay(spec(), {name, simple_agent, Identity}, Message).
+fwd(Name, Message) ->
+    manager:relay(spec(), {name, simple_agent, Name}, Message).
 
-ags(Account) ->
-    loom:patch(simple_agent:spec(spec(), Account), get_state).
+ag(AgentId) ->
+    simple_agent:spec(spec(), AgentId).
 
-nms(Account) ->
-    util:get(ags(Account), names).
+ags(AgentId) ->
+    loom:patch(ag(AgentId), get_state).
+
+nms(AgentId) ->
+    util:get(ags(AgentId), names).
 
 rep(N) ->
     manager:set_replication_factor(spec(), simple_agent, N).

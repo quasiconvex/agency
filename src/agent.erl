@@ -1,13 +1,8 @@
 -module(agent).
 -include("agency.hrl").
 
--export_type([identity/0,
-              account/0,
-              state/0,
+-export_type([state/0,
               conn/0]).
-
--type identity() :: manager:sub_name().
--type account() :: manager:sub_id().
 
 -type state() :: #{ %% + loom:state()
              roles => [atom()],
@@ -17,33 +12,46 @@
 -type conn() :: #{ %% + loom:message()
             type => conn,
             from => pid(),
-            as => identity(),
-            since => {binary(), erloom:edge()}
+            as => manager:sub_name(),
+            since => {binary(), erloom:edge()},
+            token => binary()
 }.
 
--callback spec(#manager{}, account()) -> #agent{}.
+-callback spec(#manager{}, manager:sub_id()) -> #agent{}.
 -callback home(#agent{}) -> loom:home().
--callback is_observable(loom:message(), identity(), loom:state()) -> boolean().
+-callback is_observable(loom:message(), manager:sub_name(), loom:state()) -> boolean().
 
 -optional_callbacks([is_observable/3]).
 
 %% agent
 -export([agency/1,
+         connect/2,
          connect/3,
-         connect/4]).
+         connect/4,
+         send/2,
+         send/3,
+         send/4]).
 
 %% loom
 -behavior(loom).
--export([find/1,
+-export([vsn/1,
+         find/1,
          home/1,
          opts/1,
          keep/1,
          init/1,
+         waken/1,
          verify_message/2,
          write_through/3,
+         handle_idle/1,
          handle_info/2,
          handle_message/4,
-         motion_decided/4]).
+         command_called/4,
+         motion_decided/4,
+         task_completed/4,
+         task_continued/5,
+         check_node/3,
+         needs_upgrade/2]).
 
 -export([callback/3,
          callback/4]).
@@ -53,30 +61,54 @@
 agency(#agent{agency=Agency}) ->
     Agency.
 
-connect(Agency, AgentMod, Identity) ->
-    connect(Agency, AgentMod, Identity, []).
+connect(#agent{} = Agent, As) ->
+    connect(Agent, As, []).
 
-connect(Agency, AgentMod, Identity, Opts) ->
-    %% if the identity actually maps to a different account than we thought, its ok
-    %% we can still connect to the old account:
-    %%  when the agents for the new account take over, they must notify the old agents
-    %%  eventually the old account will have a message indicating it was unlinked
+connect(#agent{agency=Agency, mod=AgentMod, id=AgentId}, As, Opts) ->
+    connect(Agency, AgentMod, As, util:modify(Opts, [cached, id], AgentId));
+connect(#manager{} = Agency, AgentMod, As) ->
+    connect(Agency, AgentMod, As, []).
+
+connect(#manager{} = Agency, AgentMod, As, Opts) ->
+    %% if the name actually maps to a different id than we thought, its ok
+    %% we can still connect to the old id:
+    %%  when the agents for the new id take over, they must notify the old agents
+    %%  eventually the old id will have a message indicating it was unlinked
     %%  when the agent is in an unlinked state, it refuses / closes client connections
     %%  when the client sees this, it forgets cached info, and tries to reconnect
     Message =
         util:update(#{
                        type => conn,
                        from => self(),
-                       as => Identity
-                     }, util:select(Opts, [since])),
-    case manager:relay(Agency, {name, AgentMod, Identity}, Message, Opts) of
+                       as => As
+                     }, util:select(Opts, [since, token])),
+    case manager:relay(Agency, {name, AgentMod, As}, Message, Opts) of
         {Node, Spec, ok} ->
             {ok, {Node, Spec}};
         {_, _, Error} ->
             Error
     end.
 
-is_observable(Message, Identity, State) ->
+send(AgentOrConn, Message) ->
+    send(AgentOrConn, Message, []).
+
+send({Node, #agent{} = Agent}, Message, Opts) ->
+    send(Agent, Message, util:modify(Opts, [cached, sites], [Node]));
+send(#agent{agency=Agency, mod=AgentMod, id=AgentId}, Message, Opts) ->
+    send(Agency, AgentMod, AgentId, Message, Opts).
+
+send(#manager{} = Agency, AgentMod, AgentId, Message) ->
+    send(Agency, AgentMod, AgentId, Message, []).
+
+send(Agency, AgentMod, AgentId, Message, Opts) ->
+    case manager:relay(Agency, {id, AgentMod, AgentId}, Message, Opts) of
+        {undefined, _, Error} ->
+            Error;
+        {_, _, Response} ->
+            Response
+    end.
+
+is_observable(Message, For, State) ->
     Default =
         case Message of
             #{path := [user|_]} ->
@@ -84,12 +116,15 @@ is_observable(Message, Identity, State) ->
             _ ->
                 false
         end,
-    callback(State, {is_observable, 3}, [Message, Identity, State], Default).
+    callback(State, {is_observable, 3}, [Message, For, State], Default).
 
 %% loom
 
-find(Spec = #agent{mod=AgentMod, account=Account}) ->
-    case manager:obtain_sites(agency(Spec), AgentMod, Account, []) of
+vsn(Spec) ->
+    maps:merge(callback(Spec, {vsn, 1}, [Spec], #{}), #{}).
+
+find(Spec = #agent{mod=AgentMod, id=AgentId}) ->
+    case manager:obtain_sites(agency(Spec), AgentMod, AgentId, []) of
         {ok, {_, Nodes}} ->
             Nodes;
         {error, _} ->
@@ -104,14 +139,28 @@ opts(Spec) ->
     maps:merge(Defaults, callback(Spec, {opts, 1}, [Spec], #{})).
 
 keep(State) ->
-    Builtins = maps:with([roles], State),
+    Builtins = maps:with([roles, tokens], State),
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
 init(State) ->
     State#{
-      roles => util:get(State, roles, [])
+      roles => util:get(State, roles, []),
+      tokens => util:get(State, tokens, #{})
      }.
 
+waken(State) ->
+    callback(State, {waken, 1}, [State], State).
+
+verify_message(Message = #{type := conn, token := Token}, State) ->
+    Now = time:unix(),
+    case util:get(State, [tokens, Token]) of
+        undefined ->
+            {error, not_authorized, State};
+        #{expiration := Exp} when Exp < Now ->
+            {error, not_authorized, State};
+        #{} ->
+            callback(State, {verify_message, 2}, [Message, State], {ok, Message, State})
+    end;
 verify_message(Message = #{scope := Scope}, State) ->
     %% if the message is accepted, we assume we are supposed to handle it
     %% handlers must match on the scope if they want to limit access using roles
@@ -129,6 +178,9 @@ write_through(Message = #{verb := lookup}, N, State) ->
 write_through(Message, N, State) ->
     callback(State, {write_through, 3}, [Message, N, State], {1, infinity}).
 
+handle_idle(State) ->
+    callback(State, {handle_idle, 1}, [State], fun () -> loom:sleep(State) end).
+
 handle_info(Info = {'EXIT', From, _}, State) ->
     case util:exists(State, [clients, From]) of
         true ->
@@ -141,16 +193,16 @@ handle_info(Info = {'EXIT', From, _}, State) ->
 handle_info(Info, State) ->
     callback(State, {handle_info, 2}, [Info, State], State).
 
-handle_builtin(#{type := conn, from := From, as := Identity}, _, true, State) ->
-    case erloom_chain:value(State, [names, Identity]) of
+handle_builtin(#{type := conn, from := From, as := Name}, _, true, State) ->
+    case erloom_chain:value(State, [names, Name]) of
         true ->
             link(From),
-            State1 = util:modify(State, [clients, From], Identity),
+            State1 = util:modify(State, [clients, From], Name),
             State2 = loom:maybe_reply(ok, State1),
-            catchup_client(From, Identity, util:get(State2, since), State2);
+            catchup_client(From, Name, util:get(State2, since), State2);
         _ ->
-            %% we refuse conns for identities we dont manage
-            State#{response => {error, {names, Identity}}}
+            %% we refuse conns for names we dont manage
+            State#{response => {error, {name, Name}}}
     end;
 
 handle_builtin(_Message, _Node, _IsNew, State) ->
@@ -161,15 +213,26 @@ handle_message(Message, Node, IsNew, State) ->
     State2 = forward_clients(Message, State1),
     callback(State2, {handle_message, 4}, [Message, Node, IsNew, State2], State2).
 
-motion_builtin(#{verb := modify, path := [names, Identity], value := false}, _, {true, _}, State) ->
-    %% close conns when we stop managing an identity
-    close_clients(Identity, State);
-motion_builtin(_Motion, _Mover, _Decision, State) ->
-    State.
+command_called(#{verb := modify, path := [names, Name], value := false}, _, true, State) ->
+    %% close conns when we stop managing a name
+    close_clients(Name, State);
+command_called(Command, Node, DidChange, State) ->
+    callback(State, {command_called, 4}, [Command, Node, DidChange, State], State).
 
 motion_decided(Motion, Mover, Decision, State) ->
-    State1 = motion_builtin(Motion, Mover, Decision, State),
-    callback(State, {motion_decided, 4}, [Motion, Mover, Decision, State1], State1).
+    callback(State, {motion_decided, 4}, [Motion, Mover, Decision, State], State).
+
+task_completed(Message, Node, Result, State) ->
+    callback(State, {task_completed, 4}, [Message, Node, Result, State], State).
+
+task_continued(Name, Reason, Clock, Arg, State) ->
+    callback(State, {task_continued, 5}, [Name, Reason, Clock, Arg, State], ok).
+
+check_node(Node, Unanswered, State) ->
+    callback(State, {check_node, 3}, [Node, Unanswered, State], State).
+
+needs_upgrade(Vsn, State) ->
+    callback(State, {needs_upgrade, 2}, [Vsn, State], State).
 
 callback(#{spec := Spec}, FA, Args) ->
     callback(Spec, FA, Args);
@@ -183,13 +246,13 @@ callback(#agent{mod=Mod}, FA, Args, Default) ->
 
 %% helpers
 
-catchup_client(Client, Identity, Since, State = #{point := Point}) ->
+catchup_client(Client, Name, Since, State = #{point := Point}) ->
     %% XXX we should really batch these into limited size chunks
     %%     and wait for ack (or timeout and disconnect) on each chunk
     Missing =
         erloom_logs:fold(
           fun (Message, Locus, Acc) ->
-                  case is_observable(Message, Identity, State) of
+                  case is_observable(Message, Name, State) of
                       true ->
                           [{Message, Locus}|Acc];
                       false ->
@@ -201,8 +264,8 @@ catchup_client(Client, Identity, Since, State = #{point := Point}) ->
 
 forward_clients(Message, State = #{locus := Locus}) ->
     maps:fold(
-      fun (Client, Identity, S) ->
-              case is_observable(Message, Identity, S) of
+      fun (Client, Name, S) ->
+              case is_observable(Message, Name, S) of
                   true ->
                       Client ! {forward, [{Message, Locus}]},
                       S;
@@ -211,12 +274,12 @@ forward_clients(Message, State = #{locus := Locus}) ->
               end
       end, State, util:get(State, clients, #{})).
 
-close_clients(Identity, State) ->
+close_clients(Name, State) ->
     maps:fold(
-      fun (Client, I, S) when I =:= Identity ->
+      fun (Client, N, S) when N =:= Name ->
               unlink(Client),
-              Client ! {closed, Identity},
-              util:remove(S, [clients, Identity]);
+              Client ! {closed, Name},
+              util:remove(S, [clients, Name]);
           (_, _, S) ->
               S
       end, State, util:get(State, clients, #{})).
