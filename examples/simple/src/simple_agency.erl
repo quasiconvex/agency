@@ -6,7 +6,8 @@
 -export([spec/0, call/1, state/0, tasks/0]).
 
 -behavior(manager).
--export([home/1,
+-export([find/2,
+         home/1,
          task_completed/4,
          task_continued/5,
          out_of_resources/2]).
@@ -15,24 +16,25 @@ a() ->
     loom:seed(spec()).
 
 b() ->
-    {ok, _} = rep(3),
-    {ok, _} = manager:change_pool(spec(), {'+', [nd("rst"), nd("uvw"), nd("xyz")]}),
-    {ok, _} = manager:obtain(spec(), simple_agent, <<"jared">>),
-    {ok, _} = manager:obtain(spec(), simple_agent, <<"jeff">>),
-    {ok, _} = manager:obtain(spec(), simple_agent, <<"thomas">>),
-    {ok, _} = rep(2).
+    {ok, _, _} = rep(3),
+    {ok, _, _} = manager:change_pool(spec(), {'+', [nd("rst"), nd("uvw"), nd("xyz")]}),
+    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"jared">>}}),
+    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"jeff">>}}),
+    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"thomas">>}}),
+    {ok, _, _} = rep(2).
 
 b2() ->
-    {ok, _} = manager:obtain(simple_agency:spec(), simple_agent, <<"jared">>),
-    {ok, _} = rep(3).
+    {ok, _, _} = manager:obtain(simple_agency:spec(), simple_agent, <<"jared">>),
+    {ok, _, _} = manager:change_pool(spec(), {'+', [nd("rst")]}),
+    {ok, _, _} = rep(1).
 
 c() ->
-    {ok, _} = manager:alias(spec(), simple_agent, <<"jared">>, <<"account">>),
-    {ok, _} = manager:alias(spec(), simple_agent, <<"jeff">>, <<"account">>).
+    {ok, _, _} = manager:alias(spec(), simple_agent, <<"jared">>, <<"account">>),
+    {ok, _, _} = manager:alias(spec(), simple_agent, <<"jeff">>, <<"account">>).
 
 d() ->
-    {ok, _} = manager:unalias(spec(), simple_agent, <<"jared">>, <<"account">>),
-    {ok, _} = manager:unalias(spec(), simple_agent, <<"jeff">>, <<"account">>).
+    {ok, _, _} = manager:unalias(spec(), simple_agent, <<"jared">>, <<"account">>),
+    {ok, _, _} = manager:unalias(spec(), simple_agent, <<"jeff">>, <<"account">>).
 
 e() ->
     a(), b(), c(), d().
@@ -74,6 +76,9 @@ tasks() ->
     util:get(state(), tasks).
 
 %% manager
+
+find(#manager{} = Spec, Ctx) ->
+    {ok, {Spec, [nd("rst")]}, Ctx}.
 
 home(#manager{mod=?MODULE}) ->
     filename:join([var, url:esc(node()), ?MODULE]).

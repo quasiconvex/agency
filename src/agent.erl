@@ -25,17 +25,16 @@
 
 %% agent
 -export([agency/1,
+         which/1,
          connect/2,
          connect/3,
-         connect/4,
          send/2,
-         send/3,
-         send/4]).
+         send/3]).
 
 %% loom
 -behavior(loom).
 -export([vsn/1,
-         find/1,
+         find/2,
          home/1,
          opts/1,
          keep/1,
@@ -61,16 +60,17 @@
 agency(#agent{agency=Agency}) ->
     Agency.
 
-connect(#agent{} = Agent, As) ->
-    connect(Agent, As, []).
+which(Specish = {#manager{}, _}) ->
+    Specish;
+which(Spec = #agent{mod=AgentMod, id=AgentId}) ->
+    %% convert a spec to something the manager can handle
+    {agency(Spec), {id, AgentMod, AgentId}}.
 
-connect(#agent{agency=Agency, mod=AgentMod, id=AgentId}, As, Opts) ->
-    connect(Agency, AgentMod, As, util:modify(Opts, [cached, id], AgentId));
-connect(#manager{} = Agency, AgentMod, As) ->
-    connect(Agency, AgentMod, As, []).
+connect(Specish, As) ->
+    connect(Specish, As, #{}).
 
-connect(#manager{} = Agency, AgentMod, As, Opts) ->
-    %% if the name actually maps to a different id than we thought, its ok
+connect(Specish, As, Ctx) ->
+    %% if the name actually maps to a different id than we thought (cached), its ok
     %% we can still connect to the old id:
     %%  when the agents for the new id take over, they must notify the old agents
     %%  eventually the old id will have a message indicating it was unlinked
@@ -81,32 +81,14 @@ connect(#manager{} = Agency, AgentMod, As, Opts) ->
                        type => conn,
                        from => self(),
                        as => As
-                     }, util:select(Opts, [since, token])),
-    case manager:relay(Agency, {name, AgentMod, As}, Message, Opts) of
-        {Node, Spec, ok} ->
-            {ok, {Node, Spec}};
-        {_, _, Error} ->
-            Error
-    end.
+                     }, util:select(Ctx, [since, token])),
+    send(Specish, Message, Ctx).
 
-send(AgentOrConn, Message) ->
-    send(AgentOrConn, Message, []).
+send(Specish, Message) ->
+    send(Specish, Message, #{}).
 
-send({Node, #agent{} = Agent}, Message, Opts) ->
-    send(Agent, Message, util:modify(Opts, [cached, sites], [Node]));
-send(#agent{agency=Agency, mod=AgentMod, id=AgentId}, Message, Opts) ->
-    send(Agency, AgentMod, AgentId, Message, Opts).
-
-send(#manager{} = Agency, AgentMod, AgentId, Message) ->
-    send(Agency, AgentMod, AgentId, Message, []).
-
-send(Agency, AgentMod, AgentId, Message, Opts) ->
-    case manager:relay(Agency, {id, AgentMod, AgentId}, Message, Opts) of
-        {undefined, _, Error} ->
-            Error;
-        {_, _, Response} ->
-            Response
-    end.
+send(Specish, Message, Ctx) ->
+    loom:patch(Specish, Message, Ctx).
 
 is_observable(Message, For, State) ->
     Default =
@@ -123,13 +105,8 @@ is_observable(Message, For, State) ->
 vsn(Spec) ->
     maps:merge(callback(Spec, {vsn, 1}, [Spec], #{}), #{}).
 
-find(Spec = #agent{mod=AgentMod, id=AgentId}) ->
-    case manager:obtain_sites(agency(Spec), AgentMod, AgentId, []) of
-        {ok, {_, Nodes}} ->
-            Nodes;
-        {error, _} ->
-            []
-    end.
+find(Specish, Ctx) ->
+    manager:find_cache(which(Specish), get_or_create, agent_cache, Ctx).
 
 home(Spec) ->
     callback(Spec, {home, 1}, [Spec]).

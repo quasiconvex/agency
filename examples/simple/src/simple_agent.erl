@@ -1,10 +1,32 @@
 -module(simple_agent).
 -include_lib("agency/include/agency.hrl").
 
+%% convenience
+-export([connect/1,
+         connect/2,
+         send/2,
+         send/3,
+         spec/1]).
+
 -behavior(agent).
 -export([spec/2,
          home/1,
          handle_message/4]).
+
+connect(Name) ->
+    connect(Name, #{}).
+
+connect(Name, Ctx) ->
+    agent:connect({simple_agency:spec(), {name, ?MODULE, Name}}, Name, Ctx).
+
+send(Name, Message) ->
+    send(Name, Message, #{}).
+
+send(Name, Message, Ctx) ->
+    agent:send({simple_agency:spec(), {name, ?MODULE, Name}}, Message, Ctx).
+
+spec(AgentId) ->
+    spec(simple_agency:spec(), AgentId).
 
 spec(Agency, AgentId) ->
     #agent{mod=?MODULE, agency=Agency, id=AgentId}.
