@@ -6,6 +6,7 @@
 
 -type state() :: #{ %% + loom:state()
              roles => [atom()],
+             tokens => #{},
              clients => #{}
             }.
 
@@ -25,6 +26,7 @@
 
 %% agent
 -export([agency/1,
+         id/1,
          which/1,
          connect/2,
          connect/3,
@@ -59,6 +61,11 @@
 
 agency(#agent{agency=Agency}) ->
     Agency.
+
+id(#{spec := Spec}) ->
+    id(Spec);
+id(#agent{id=AgentId}) ->
+    AgentId.
 
 which(Specish = {#manager{}, _}) ->
     Specish;
@@ -130,7 +137,7 @@ waken(State) ->
 
 verify_message(Message = #{type := conn, token := Token}, State) ->
     Now = time:unix(),
-    case util:get(State, [tokens, Token]) of
+    case util:lookup(State, [tokens, Token]) of
         undefined ->
             {error, not_authorized, State};
         #{expiration := Exp} when Exp < Now ->

@@ -184,7 +184,13 @@ alias(Manager, SubType, SubName, SubId, Ctx) when is_binary(SubName), is_binary(
             type => tether,
             verb => accrue,
             path => [sub_names, SubType, SubName],
-            value => {push, SubId}
+            value =>
+                case util:get(Ctx, weak) of
+                    true ->
+                        {init, SubId};
+                    _ ->
+                        {push, SubId}
+                end
            }, Ctx).
 
 unalias(Manager, SubType, SubName, SubId) ->
@@ -485,9 +491,7 @@ command_called(#{verb := lookup, what := {name, SubType, SubName}}, _, _, State)
         A when A =:= undefined; A =:= [] ->
             State#{resonse => {ok, {false, undefined}}};
         [SubId|_] ->
-            SubSpec = subordinate_spec(State, [SubType, SubId]),
-            Sites = erloom_chain:value(State, [sub_sites, SubType, SubId], []),
-            State#{response => {ok, {false, {SubSpec, Sites}}}}
+            respond_spec_sites(SubType, SubId, State)
     end;
 
 command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
@@ -500,9 +504,7 @@ command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
             Message = #{verb => create, path => [sub_names, SubType, SubName], value => [SubId]},
             loom:no_reply(loom:make_tether(Message, State));
         [SubId|_] ->
-            SubSpec = subordinate_spec(State, [SubType, SubId]),
-            Sites = erloom_chain:value(State, [sub_sites, SubType, SubId], []),
-            State#{response => {ok, {false, {SubSpec, Sites}}}}
+            respond_spec_sites(SubType, SubId, State)
     end;
 
 command_called(#{verb := create, path := [sub_names|Sub_], value := [Initial]}, Node, true, State) ->
@@ -514,6 +516,10 @@ command_called(#{verb := accrue, path := [sub_names|Sub_], value := Change}, Nod
     %% an alias was created or destroyed, subordinates must reflect new ownership
     Transfer =
         case {Change, erloom_chain:value(State, [sub_names|Sub_])} of
+            {{init, New}, [New]} ->
+                {undefined, New};
+            {{init, _}, [Old|_]} ->
+                {Old, Old};
             {{push, New}, [New]} ->
                 {undefined, New};
             {{push, New}, [New, Old|_]} ->
@@ -527,9 +533,7 @@ command_called(#{verb := accrue, path := [sub_names|Sub_], value := Change}, Nod
     loom:no_reply(loom:suture_task({name, Sub_}, Node, Task, State));
 
 command_called(#{verb := lookup, what := {id, SubType, SubId}}, _, _, State) ->
-    SubSpec = subordinate_spec(State, [SubType, SubId]),
-    Sites = erloom_chain:value(State, [sub_sites, SubType, SubId], []),
-    State#{response => {ok, {false, {SubSpec, Sites}}}};
+    respond_spec_sites(SubType, SubId, State);
 
 command_called(#{verb := obtain, what := {id, SubType, SubId}}, _, _, State)
   when is_binary(SubId) ->
@@ -539,8 +543,7 @@ command_called(#{verb := obtain, what := {id, SubType, SubId}}, _, _, State)
             Message = #{verb => create, path => [sub_sites, SubType, SubId], value => []},
             loom:no_reply(loom:make_tether(Message, State));
         Sites ->
-            SubSpec = subordinate_spec(State, [SubType, SubId]),
-            State#{response => {ok, {false, {SubSpec, Sites}}}}
+            respond_spec_sites(SubType, SubId, Sites, State)
     end;
 
 command_called(#{verb := create, path := [sub_sites|Sub]}, Node, true, State) when Node =:= node() ->
@@ -740,6 +743,18 @@ accrue_u9n(Utilization, Node, Field, Op) ->
                     ({T, {S, P}}) when Field =:= total ->
                         {util:op(T, Op), {S, P}}
                 end).
+
+%% common helpers
+
+respond_spec_sites(SubType, SubId, State) ->
+    Sites = erloom_chain:value(State, [sub_sites, SubType, SubId]),
+    respond_spec_sites(SubType, SubId, Sites, State).
+
+respond_spec_sites(_, _, undefined, State) ->
+    State#{response => {ok, {false, undefined}}};
+respond_spec_sites(SubType, SubId, Sites, State) ->
+    SubSpec = subordinate_spec(State, [SubType, SubId]),
+    State#{response => {ok, {false, {SubSpec, Sites}}}}.
 
 %% manage resources
 
@@ -1007,21 +1022,26 @@ do_assign_pool({Sub, {Old, New}}, State) ->
 %% name management
 %% ensure that names are transferred between the subordinates to reflect alias changes
 
+do_transfer_name({_, {Same, Same}}, _) ->
+    %% do nothing if there is no change
+    {done, {false, Same}};
 do_transfer_name({[SubType, SubName], {undefined, New}}, State) ->
     %% just give control to the new subordinate, since there is no old one
+    %% NB: always returns the {SubSpec, Sites} as needed by create / first name
     do_micromanage(State, {id, SubType, New}, [names, SubName], true);
 do_transfer_name({[SubType, SubName], {Old, undefined}}, State) ->
     %% just revoke the control from the old subordinate, since there is no new one
-    do_micromanage(State, {id, SubType, Old}, [names, SubName], false);
+    %% NB: override to return undefined, indicating no more names
+    do_micromanage(State, {id, SubType, Old}, [names, SubName], false, {true, undefined});
 do_transfer_name({[SubType, SubName], {Old, New}}, State) ->
     %% transfer control of the name to the new subordinate from the old one, if any
     %% the new subordinate relieves the old one of duty, and copies anything it needs
     %% during the transition period they might both think they own the name, which is fine
     %% the agency only points to one of them (who knows how long it takes for them to find out)
-    %% NB: return the new {SubSpec, Sites}, not the old
+    %% NB: return the new name, not the {SubSpec, Sites} (used by alias/unalias)
     case do_micromanage(State, {id, SubType, New}, [names, SubName], true) of
-        {done, Return} ->
-            do_micromanage(State, {id, SubType, Old}, [names, SubName], false, Return);
+        {done, _} ->
+            do_micromanage(State, {id, SubType, Old}, [names, SubName], false, {true, New});
         Other ->
             Other
     end.
@@ -1032,7 +1052,6 @@ do_micromanage(Manager, Subish, Path, Value) ->
 do_micromanage(Manager, Subish, Path, Value, Return) ->
     %% probe the path first to prevent duplicating requests
     %% then wait, modify, or retry as needed
-    %% NB: always returns the {SubSpec, Sites} as needed by create
     Probe = #{
       type => command,
       kind => probe,
@@ -1048,7 +1067,7 @@ do_micromanage(Manager, Subish, Path, Value, Return) ->
             {retry, {10, seconds}, {wait, {Node, Reason}}};
         {ok, {ok, {_, Value}}, #{dstat := #{spec := SubSpec, nodes := Sites}}} ->
             %% the value has already been set, all done
-            {done, util:def(Return, {ok, {false, {SubSpec, Sites}}})};
+            {done, util:def(Return, {ok, {true, {SubSpec, Sites}}})};
         {ok, {ok, _}, #{dstat := #{spec := SubSpec, node := Node, nodes := Sites}}} ->
             %% the value is something else, try sending
             Modify = #{
