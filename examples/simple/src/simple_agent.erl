@@ -4,8 +4,8 @@
 %% convenience
 -export([connect/1,
          connect/2,
-         send/2,
-         send/3,
+         patch/2,
+         patch/3,
          spec/1]).
 
 -behavior(agent).
@@ -19,11 +19,11 @@ connect(Name) ->
 connect(Name, Ctx) ->
     agent:connect({simple_agency:spec(), {name, ?MODULE, Name}}, Name, Ctx).
 
-send(Name, Message) ->
-    send(Name, Message, #{}).
+patch(Name, Message) ->
+    patch(Name, Message, #{}).
 
-send(Name, Message, Ctx) ->
-    agent:send({simple_agency:spec(), {name, ?MODULE, Name}}, Message, Ctx).
+patch(Name, Message, Ctx) ->
+    agent:patch({simple_agency:spec(), {name, ?MODULE, Name}}, Message, Ctx).
 
 spec(AgentId) ->
     spec(simple_agency:spec(), AgentId).

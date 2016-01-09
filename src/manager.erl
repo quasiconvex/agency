@@ -1027,21 +1027,19 @@ do_transfer_name({_, {Same, Same}}, _) ->
     {done, {false, Same}};
 do_transfer_name({[SubType, SubName], {undefined, New}}, State) ->
     %% just give control to the new subordinate, since there is no old one
-    %% NB: always returns the {SubSpec, Sites} as needed by create / first name
     do_micromanage(State, {id, SubType, New}, [names, SubName], true);
 do_transfer_name({[SubType, SubName], {Old, undefined}}, State) ->
     %% just revoke the control from the old subordinate, since there is no new one
-    %% NB: override to return undefined, indicating no more names
-    do_micromanage(State, {id, SubType, Old}, [names, SubName], false, {true, undefined});
+    do_micromanage(State, {id, SubType, Old}, [names, SubName], false);
 do_transfer_name({[SubType, SubName], {Old, New}}, State) ->
     %% transfer control of the name to the new subordinate from the old one, if any
     %% the new subordinate relieves the old one of duty, and copies anything it needs
     %% during the transition period they might both think they own the name, which is fine
     %% the agency only points to one of them (who knows how long it takes for them to find out)
-    %% NB: return the new name, not the {SubSpec, Sites} (used by alias/unalias)
+    %% NB: return the new {SubSpec, Sites}, not the old
     case do_micromanage(State, {id, SubType, New}, [names, SubName], true) of
-        {done, _} ->
-            do_micromanage(State, {id, SubType, Old}, [names, SubName], false, {true, New});
+        {done, Return} ->
+            do_micromanage(State, {id, SubType, Old}, [names, SubName], false, Return);
         Other ->
             Other
     end.
@@ -1052,6 +1050,7 @@ do_micromanage(Manager, Subish, Path, Value) ->
 do_micromanage(Manager, Subish, Path, Value, Return) ->
     %% probe the path first to prevent duplicating requests
     %% then wait, modify, or retry as needed
+    %% NB: always returns the {SubSpec, Sites} as needed by create
     Probe = #{
       type => command,
       kind => probe,

@@ -20,9 +20,10 @@
 
 -callback spec(#manager{}, manager:sub_id()) -> #agent{}.
 -callback home(#agent{}) -> loom:home().
--callback is_observable(loom:message(), manager:sub_name(), loom:state()) -> boolean().
+-callback client_filter(loom:message(), manager:sub_name(), loom:state()) ->
+    loom:message() | undefined.
 
--optional_callbacks([is_observable/3]).
+-optional_callbacks([client_filter/3]).
 
 %% agent
 -export([agency/1,
@@ -30,8 +31,14 @@
          which/1,
          connect/2,
          connect/3,
-         send/2,
-         send/3]).
+         patch/2,
+         patch/3]).
+
+%% agent mod helpers
+-export([is_valid_token/2,
+         create_token/3,
+         forget_token/2,
+         purge_tokens/1]).
 
 %% loom
 -behavior(loom).
@@ -87,25 +94,28 @@ connect(Specish, As, Ctx) ->
         util:update(#{
                        type => conn,
                        from => self(),
-                       as => As
+                       as => As,
+                       at => time:unix()
                      }, util:select(Ctx, [since, token])),
-    send(Specish, Message, Ctx).
+    patch(Specish, Message, Ctx).
 
-send(Specish, Message) ->
-    send(Specish, Message, #{}).
+patch(Specish, Message) ->
+    patch(Specish, Message, #{}).
 
-send(Specish, Message, Ctx) ->
+patch(Specish, Message, Ctx) ->
     loom:patch(Specish, Message, Ctx).
 
-is_observable(Message, For, State) ->
+client_filter(#{mute := true}, _, _) ->
+    undefined;
+client_filter(Message, For, State) ->
     Default =
         case Message of
-            #{path := [user|_]} ->
-                true;
+            #{type := client} ->
+                Message;
             _ ->
-                false
+                undefined
         end,
-    callback(State, {is_observable, 3}, [Message, For, State], Default).
+    callback(State, {client_filter, 3}, [Message, For, State], Default).
 
 %% loom
 
@@ -113,7 +123,7 @@ vsn(Spec) ->
     maps:merge(callback(Spec, {vsn, 1}, [Spec], #{}), #{}).
 
 find(Specish, Ctx) ->
-    manager:find_cache(which(Specish), get_or_create, agent_cache, Ctx).
+    manager:find_cache(which(Specish), get_or_create, agent, Ctx).
 
 home(Spec) ->
     callback(Spec, {home, 1}, [Spec]).
@@ -133,17 +143,15 @@ init(State) ->
      }.
 
 waken(State) ->
-    callback(State, {waken, 1}, [State], State).
+    State1 = purge_tokens(State),
+    callback(State1, {waken, 1}, [State1], State1).
 
 verify_message(Message = #{type := conn, token := Token}, State) ->
-    Now = time:unix(),
-    case util:lookup(State, [tokens, Token]) of
-        undefined ->
-            {error, not_authorized, State};
-        #{expiration := Exp} when Exp < Now ->
-            {error, not_authorized, State};
-        #{} ->
-            callback(State, {verify_message, 2}, [Message, State], {ok, Message, State})
+    case is_valid_token(State, Token) of
+        true ->
+            callback(State, {verify_message, 2}, [Message, State], {ok, Message, State});
+        false ->
+            {error, not_authorized, State}
     end;
 verify_message(Message = #{scope := Scope}, State) ->
     %% if the message is accepted, we assume we are supposed to handle it
@@ -163,7 +171,17 @@ write_through(Message, N, State) ->
     callback(State, {write_through, 3}, [Message, N, State], {1, infinity}).
 
 handle_idle(State) ->
-    callback(State, {handle_idle, 1}, [State], fun () -> loom:sleep(State) end).
+    %% default is not to sleep as long as any clients are connected
+    Default =
+        fun () ->
+                case util:get(State, clients) of
+                    C when map_size(C) > 0 ->
+                        loom:save(State);
+                    _ ->
+                        loom:sleep(State)
+                end
+        end,
+    callback(State, {handle_idle, 1}, [State], Default).
 
 handle_info(Info = {'EXIT', From, _}, State) ->
     case util:exists(State, [clients, From]) of
@@ -177,13 +195,13 @@ handle_info(Info = {'EXIT', From, _}, State) ->
 handle_info(Info, State) ->
     callback(State, {handle_info, 2}, [Info, State], State).
 
-handle_builtin(#{type := conn, from := From, as := Name}, _, true, State) ->
+handle_builtin(#{type := conn, from := From, as := Name} = Message, _, true, State) ->
     case erloom_chain:value(State, [names, Name]) of
         true ->
             link(From),
             State1 = util:modify(State, [clients, From], Name),
             State2 = loom:maybe_reply(ok, State1),
-            catchup_client(From, Name, util:get(State2, since), State2);
+            catchup_client(From, Name, util:get(Message, since), State2);
         _ ->
             %% we refuse conns for names we dont manage
             State#{response => {error, {name, Name}}}
@@ -228,7 +246,40 @@ callback(#{spec := Spec}, FA, Args, Default) ->
 callback(#agent{mod=Mod}, FA, Args, Default) ->
     loom:callback(Mod, FA, Args, Default).
 
-%% helpers
+%% token management
+%%
+%% tokens are just secrets kept by the agent and associated with a value
+%% tokens can expire, and they can be used to ensure a client is allowed to connect
+%% agent modules may use tokens for shared secrets in other types of messages
+
+is_valid_token(State, Token) ->
+    Now = time:unix(),
+    case util:lookup(State, [tokens, Token]) of
+        undefined ->
+            false;
+        #{expiration := Exp} when Exp < Now ->
+            false;
+        #{} ->
+            true
+    end.
+
+create_token(State, Token, Value = #{}) ->
+    util:modify(State, [tokens, Token], Value).
+
+forget_token(State, Token) ->
+    util:remove(State, [tokens, Token]).
+
+purge_tokens(State = #{tokens := Tokens}) ->
+    Now = time:unix(),
+    Tokens1 =
+        util:fold(fun ({_, #{expiration := Exp}}, Acc) when Exp < Now ->
+                          Acc;
+                      ({T, V}, Acc) ->
+                          util:set(Acc, T, V)
+                  end, #{}, Tokens),
+    State#{tokens => Tokens1}.
+
+%% client helpers
 
 catchup_client(Client, Name, Since, State = #{point := Point}) ->
     %% XXX we should really batch these into limited size chunks
@@ -236,24 +287,24 @@ catchup_client(Client, Name, Since, State = #{point := Point}) ->
     Missing =
         erloom_logs:fold(
           fun (Message, Locus, Acc) ->
-                  case is_observable(Message, Name, State) of
-                      true ->
-                          [{Message, Locus}|Acc];
-                      false ->
-                          Acc
+                  case client_filter(Message, Name, State) of
+                      undefined ->
+                          Acc;
+                      Msg ->
+                          [{Msg, Locus}|Acc]
                   end
           end, [], {Since, Point}, State),
-    Client ! {catchup, lists:reverse(Missing), Point},
+    Client ! {catchup, lists:reverse(Missing)},
     State.
 
 forward_clients(Message, State = #{locus := Locus}) ->
     maps:fold(
       fun (Client, Name, S) ->
-              case is_observable(Message, Name, S) of
-                  true ->
-                      Client ! {forward, [{Message, Locus}]},
+              case client_filter(Message, Name, S) of
+                  undefined ->
                       S;
-                  false ->
+                  Msg ->
+                      Client ! {forward, [{Msg, Locus}]},
                       S
               end
       end, State, util:get(State, clients, #{})).
