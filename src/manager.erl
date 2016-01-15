@@ -502,7 +502,7 @@ command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
             %% we dont need yet another emit, unless we want to choose the value later
             SubId = make_subordinate_id(SubType, SubName),
             Message = #{verb => create, path => [sub_names, SubType, SubName], value => [SubId]},
-            loom:no_reply(loom:make_tether(Message, State));
+            loom:wait(loom:make_tether(Message, State));
         [SubId|_] ->
             respond_spec_sites(SubType, SubId, State)
     end;
@@ -510,7 +510,7 @@ command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
 command_called(#{verb := create, path := [sub_names|Sub_], value := [Initial]}, Node, true, State) ->
     %% a new name has been created, just transfer to the initial owner
     Task = {fun ?MODULE:do_transfer_name/2, {Sub_, {undefined, Initial}}},
-    loom:no_reply(loom:suture_task({name, Sub_}, Node, Task, State));
+    loom:wait(loom:suture_task({name, Sub_}, Node, Task, State));
 
 command_called(#{verb := accrue, path := [sub_names|Sub_], value := Change}, Node, true, State) ->
     %% an alias was created or destroyed, subordinates must reflect new ownership
@@ -530,7 +530,7 @@ command_called(#{verb := accrue, path := [sub_names|Sub_], value := Change}, Nod
                 {Old, New}
         end,
     Task = {fun ?MODULE:do_transfer_name/2, {Sub_, Transfer}},
-    loom:no_reply(loom:suture_task({name, Sub_}, Node, Task, State));
+    loom:wait(loom:suture_task({name, Sub_}, Node, Task, State));
 
 command_called(#{verb := lookup, what := {id, SubType, SubId}}, _, _, State) ->
     respond_spec_sites(SubType, SubId, State);
@@ -541,7 +541,7 @@ command_called(#{verb := obtain, what := {id, SubType, SubId}}, _, _, State)
         undefined ->
             %% get permission to change first, then choose the value and emit
             Message = #{verb => create, path => [sub_sites, SubType, SubId], value => []},
-            loom:no_reply(loom:make_tether(Message, State));
+            loom:wait(loom:make_tether(Message, State));
         Sites ->
             respond_spec_sites(SubType, SubId, Sites, State)
     end;
@@ -561,7 +561,7 @@ command_called(#{verb := create, path := [sub_sites|Sub]}, Node, true, State) wh
             false ->
                 State1
         end,
-    loom:no_reply(State2); %% NB: sub_sites task will return
+    loom:wait(State2); %% NB: sub_sites task will return
 
 command_called(#{verb := accrue, path := [sub_sites|Sub]}, Node, true, State) ->
     %% time to actually change the sites for the subordinate, reflect changes in stats
@@ -570,7 +570,7 @@ command_called(#{verb := accrue, path := [sub_sites|Sub]}, Node, true, State) ->
     Latter = erloom_chain:value(State, [sub_sites|Sub], []),
     Task = {fun ?MODULE:do_control_sites/2, {Sub, {Former, Latter}}},
     State1 = pool_allocated([sub_sites|Sub], util:diff(Former, Latter), State),
-    loom:no_reply(loom:stitch_task({sub, Sub}, Node, Task, State1));
+    loom:wait(loom:stitch_task({sub, Sub}, Node, Task, State1));
 
 command_called(#{verb := accrue, path := [sub_pools|Sub]}, Node, true, State) ->
     %% time to actually change the pool for the subordinate, reflect changes in stats
@@ -580,7 +580,7 @@ command_called(#{verb := accrue, path := [sub_pools|Sub]}, Node, true, State) ->
     Latter = erloom_chain:value(State, [sub_pools|Sub], []),
     Task = {fun ?MODULE:do_assign_pool/2, {Sub, {Former, Latter}}},
     State1 = pool_allocated([sub_pools|Sub], util:diff(Former, Latter), State),
-    loom:no_reply(loom:stitch_task({sub, Sub}, Node, Task, State1));
+    loom:wait(loom:stitch_task({sub, Sub}, Node, Task, State1));
 
 command_called(Command, Node, DidChange, State) ->
     callback(State, {command_called, 4}, [Command, Node, DidChange, State], State).
