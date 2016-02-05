@@ -1,9 +1,9 @@
 -module(simple_agency).
 -include_lib("agency/include/agency.hrl").
 
--export([a/0, b/0, b2/0, c/0, d/0, e/0, f/0, f/3]).
+-export([a/0, b/0, b2/0, c/0, d/0, e/0, f/0, f/3, v/0]).
 -export([nd/1, fwd/2, ag/1, ags/1, nms/1, rep/1]).
--export([spec/0, call/1, state/0, tasks/0]).
+-export([spec/0, call/1, state/0, subs/0, tasks/0]).
 
 -behavior(manager).
 -export([find/2,
@@ -24,7 +24,7 @@ b() ->
     {ok, _, _} = rep(2).
 
 b2() ->
-    {ok, _, _} = manager:obtain(simple_agency:spec(), simple_agent, <<"jared">>),
+    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"jared">>}}),
     {ok, _, _} = manager:change_pool(spec(), {'+', [nd("rst")]}),
     {ok, _, _} = rep(1).
 
@@ -45,17 +45,21 @@ f() ->
 f(A, B, C) ->
     manager:inform_pool(spec(), #{nd("rst") => A, nd("uvw") => B, nd("xyz") => C}).
 
+v() ->
+    {ok, _, _} = manager:vacate({spec(), {name, simple_agent, <<"thomas">>}}).
+
 nd(Name) ->
     util:atom(Name ++ "@" ++ util:ok(inet:gethostname())).
 
 fwd(Name, Message) ->
-    manager:relay(spec(), {name, simple_agent, Name}, Message).
+    loom:patch({spec(), {name, simple_agent, Name}}, Message).
 
 ag(AgentId) ->
     simple_agent:spec(spec(), AgentId).
 
 ags(AgentId) ->
-    loom:patch(ag(AgentId), get_state).
+    {ok, State, _} = loom:patch(ag(AgentId), get_state),
+    State.
 
 nms(AgentId) ->
     util:get(ags(AgentId), names).
@@ -67,10 +71,28 @@ spec() ->
     manager:spec(?MODULE).
 
 call(Message) ->
-    loom:call(spec(), Message).
+    loom:patch(spec(), Message).
 
 state() ->
-    loom:call(spec(), get_state).
+    {ok, State, _} = call(get_state),
+    State.
+
+subs() ->
+    State = state(),
+    SubNames = util:get(State, sub_names),
+    SubSites = util:get(State, sub_sites),
+    util:fold(
+      fun ({SubType, BySubName}, Acc) ->
+              util:fold(
+                fun({SubName, Ids}, A) ->
+                        case util:first(element(1, Ids)) of
+                            undefined ->
+                                A;
+                            SubId ->
+                                A#{SubName => {SubId, erloom_chain:value(SubSites, [SubType, SubId])}}
+                        end
+                end, Acc, BySubName)
+      end, #{}, SubNames).
 
 tasks() ->
     util:get(state(), tasks).

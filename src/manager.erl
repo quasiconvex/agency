@@ -22,6 +22,14 @@
 %%    Track both measured and desired utilization
 %%    When nodes fill up, they may request us to relocate some of our subordinates
 
+%% XXX High level known issues:
+%%  - cycling rep factor (e.g. from 1 to 3 to 1) rapidly can confuse a sub
+%%    this isn't really a supported use case but:
+%%     possibly screws up its syncing (probably due to inaccurate peers)
+%%     maybe caused by moving across non-overlapping set of nodes (hypothesis, not tested)
+%%  - realloc semantics are wrong (see do_adjust_subs)
+%%  - vacating subs is not completely safe (see do_remove_sub)
+
 %% behavior
 -export_type([sub_type/0,
               sub_name/0,
@@ -47,12 +55,15 @@
 %% client
 -export([spec/1,
          spec/2,
-         spec/4]).
+         spec/4,
+         id/1]).
 
 -export([lookup/1,
          lookup/2,
          obtain/1,
          obtain/2,
+         vacate/1,
+         vacate/2,
          ids/1,
          ids/2,
          sites/1,
@@ -86,17 +97,12 @@
          request_resources/3,
          request_resources/4]).
 
-%% generic
--export([patch/2,
-         patch/3,
-         relay/3,
-         relay/4]).
-
 %% tasks
 -export([do_control_sites/2,
          do_assign_pool/2,
          do_adjust_subs/2,
-         do_transfer_name/2]).
+         do_transfer_name/2,
+         do_remove_sub/2]).
 
 %% loom
 -behavior(loom).
@@ -123,6 +129,9 @@
 -export([callback/3,
          callback/4]).
 
+%% manager impl helpers
+-export([list_sub_names/2]).
+
 %% client
 
 spec(Mod) ->
@@ -133,6 +142,11 @@ spec(Mod, Name) ->
 
 spec(Mod, Name, Boss, Id) ->
     #manager{mod=Mod, reg_name=Name, boss=Boss, id=Id}.
+
+id(#{spec := Spec}) ->
+    id(Spec);
+id(#manager{id=Id}) ->
+    Id.
 
 lookup(Which) ->
     lookup(Which, #{}).
@@ -151,6 +165,16 @@ obtain({Manager, Subish}, Ctx) ->
     patch(Manager, #{
             type => command,
             verb => obtain,
+            what => Subish
+           }, Ctx).
+
+vacate(Which) ->
+    vacate(Which, #{}).
+
+vacate({Manager, Subish}, Ctx) ->
+    patch(Manager, #{
+            type => command,
+            verb => vacate,
             what => Subish
            }, Ctx).
 
@@ -351,20 +375,8 @@ request_resources(Manager, Path, HaveWant, Ctx) ->
 
 %% 'patch' dispatches a message to a manager (but unwraps value by default)
 
-patch(Manager, Message) ->
-    patch(Manager, Message, #{}).
-
 patch(Manager, Message, Ctx) ->
     loom:patch(Manager, Message, Ctx).
-
-%% 'relay' dispatches a message to a subordinate of manager by name or id (or spec)
-
-relay(Manager, Subish, Message) ->
-    relay(Manager, Subish, Message, #{}).
-relay(#{spec := Spec}, Subish, Message, Ctx) ->
-    relay(Spec, Subish, Message, Ctx);
-relay(Manager, Subish, Message, Ctx) ->
-    loom:dispatch({Manager, Subish}, Message, Ctx).
 
 %% manage subordinate
 
@@ -486,10 +498,11 @@ command_called(#{verb := accrue, path := [replication, SubType]}, Node, true, St
     Task = {fun ?MODULE:do_adjust_subs/2, {{type, SubType}, replication}},
     loom:suture_task(adjust, Node, Task, State);
 
-command_called(#{verb := lookup, what := {name, SubType, SubName}}, _, _, State) ->
+command_called(#{verb := lookup, what := {name, SubType, SubName}}, _, _, State)
+  when is_binary(SubName) ->
     case erloom_chain:value(State, [sub_names, SubType, SubName]) of
         A when A =:= undefined; A =:= [] ->
-            State#{resonse => {ok, {false, undefined}}};
+            State#{response => {ok, {false, undefined}}};
         [SubId|_] ->
             respond_spec_sites(SubType, SubId, State)
     end;
@@ -501,38 +514,32 @@ command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
             %% information will be propagated through the chain motion itself
             %% we dont need yet another emit, unless we want to choose the value later
             SubId = make_subordinate_id(SubType, SubName),
-            Message = #{verb => create, path => [sub_names, SubType, SubName], value => [SubId]},
+            Message = #{verb => accrue, path => [sub_names, SubType, SubName], value => {init, SubId}},
             loom:wait(loom:make_tether(Message, State));
         [SubId|_] ->
             respond_spec_sites(SubType, SubId, State)
     end;
 
-command_called(#{verb := create, path := [sub_names|Sub_], value := [Initial]}, Node, true, State) ->
-    %% a new name has been created, just transfer to the initial owner
-    Task = {fun ?MODULE:do_transfer_name/2, {Sub_, {undefined, Initial}}},
-    loom:wait(loom:suture_task({name, Sub_}, Node, Task, State));
+command_called(#{verb := vacate, what := {name, SubType, SubName}}, Node, DidChange, State)
+  when is_binary(SubName) ->
+    case erloom_chain:value(State, [sub_names, SubType, SubName]) of
+        A when A =:= undefined; A =:= [] ->
+            State#{response => {ok, {false, undefined}}};
+        [SubId|_] ->
+            %% treat the same as if called directly on the id, since remove task unaliases later
+            command_called(#{verb => vacate, what => {id, SubType, SubId}}, Node, DidChange, State)
+    end;
 
-command_called(#{verb := accrue, path := [sub_names|Sub_], value := Change}, Node, true, State) ->
-    %% an alias was created or destroyed, subordinates must reflect new ownership
-    Transfer =
-        case {Change, erloom_chain:value(State, [sub_names|Sub_])} of
-            {{init, New}, [New]} ->
-                {undefined, New};
-            {{init, _}, [Old|_]} ->
-                {Old, Old};
-            {{push, New}, [New]} ->
-                {undefined, New};
-            {{push, New}, [New, Old|_]} ->
-                {Old, New};
-            {{drop, Old}, []} ->
-                {Old, undefined};
-            {{drop, Old}, [New|_]} ->
-                {Old, New}
-        end,
+command_called(#{verb := accrue, path := [sub_names|Sub_]}, Node, true, State) ->
+    %% either a new name has been created or an alias was created or destroyed
+    %% subordinates must reflect the new ownership
+    Transfer = {util:first(erloom_chain:value(State, former, [])),
+                util:first(erloom_chain:value(State, [sub_names|Sub_], []))},
     Task = {fun ?MODULE:do_transfer_name/2, {Sub_, Transfer}},
     loom:wait(loom:suture_task({name, Sub_}, Node, Task, State));
 
-command_called(#{verb := lookup, what := {id, SubType, SubId}}, _, _, State) ->
+command_called(#{verb := lookup, what := {id, SubType, SubId}}, _, _, State)
+  when is_binary(SubId) ->
     respond_spec_sites(SubType, SubId, State);
 
 command_called(#{verb := obtain, what := {id, SubType, SubId}}, _, _, State)
@@ -544,6 +551,32 @@ command_called(#{verb := obtain, what := {id, SubType, SubId}}, _, _, State)
             loom:wait(loom:make_tether(Message, State));
         Sites ->
             respond_spec_sites(SubType, SubId, Sites, State)
+    end;
+
+command_called(#{verb := vacate, what := {id, SubType, SubId}}, _, _, State)
+  when is_binary(SubId) ->
+    case erloom_chain:value(State, [sub_sites, SubType, SubId]) of
+        undefined ->
+            State#{response => {ok, {false, undefined}}};
+        _Sites ->
+            %% to vacate we must vote to remove both the sites & the pool for sub
+            %% NB: we are lucky the batch returns {true, undefined}, which is correct here
+            %%     otherwise we could add a handler for the batch message in motion_decided
+            %%     that handler could wait for the remove task to finish, and return the same
+            Message = #{
+              kind => batch,
+              value => [#{
+                           type => command,
+                           verb => remove,
+                           path => [sub_sites, SubType, SubId]
+                         },
+                        #{
+                           type => command,
+                           verb => remove,
+                           path => [sub_pools, SubType, SubId]
+                         }]
+             },
+            loom:wait(loom:make_tether(Message, State))
     end;
 
 command_called(#{verb := create, path := [sub_sites|Sub]}, Node, true, State) when Node =:= node() ->
@@ -581,6 +614,19 @@ command_called(#{verb := accrue, path := [sub_pools|Sub]}, Node, true, State) ->
     Task = {fun ?MODULE:do_assign_pool/2, {Sub, {Former, Latter}}},
     State1 = pool_allocated([sub_pools|Sub], util:diff(Former, Latter), State),
     loom:wait(loom:stitch_task({sub, Sub}, Node, Task, State1));
+
+command_called(#{verb := remove, path := [sub_sites|Sub]}, Node, true, State) ->
+    %% time to actually get rid of the sub, run the task and reflect changes in stats
+    Former = erloom_chain:value(State, former, []),
+    Task = {fun ?MODULE:do_remove_sub/2, {Sub, Former}},
+    State1 = pool_allocated([sub_sites|Sub], {[], Former}, State),
+    loom:wait(loom:stitch_task({sub, Sub}, Node, Task, State1));
+
+command_called(#{verb := remove, path := [sub_pools|Sub]}, _, true, State) ->
+    %% just reflect changes in stats, everything else handled when the sites are removed
+    Former = erloom_chain:value(State, former, []),
+    State1 = pool_allocated([sub_pools|Sub], {[], Former}, State),
+    loom:wait(State1); %% NB: should've been called in vacate batch, task will return
 
 command_called(Command, Node, DidChange, State) ->
     callback(State, {command_called, 4}, [Command, Node, DidChange, State], State).
@@ -780,8 +826,27 @@ iter_subordinates({type, SubType}, State) ->
               [{SubType, SubId}|Acc]
       end, [], util:lookup(State, [sub_sites, SubType], [])).
 
+list_sub_names(FilterType, State) ->
+    %% XXX: affected similarly by lmdb
+    util:fold(
+      fun ({SubType, BySubName}, Acc) ->
+              case FilterType(SubType) of
+                  true ->
+                      util:fold(
+                        fun ({SubName, {[_|_], _}}, A) ->
+                                [{SubType, SubName}|A];
+                            ({SubName, {[_|_], _, _}}, A) ->
+                                [{SubType, SubName}|A];
+                            ({_, _}, A) ->
+                                A
+                        end, Acc, BySubName);
+                  false ->
+                      Acc
+              end
+      end, [], util:lookup(State, [sub_names], [])).
+
 ranked_nodes(PoolInfo) ->
-    util:vals(lists:keysort(1, util:index(PoolInfo, []))).
+    util:vals(lists:keysort(1, util:index(PoolInfo))).
 
 choose_nodes(Path, State) ->
     choose_nodes(Path, erloom_chain:value(State, Path), State).
@@ -832,7 +897,7 @@ maybe_realloc(_Trigger, _Path, Acc) ->
     Acc.
 
 potential_realloc(Path, {_, State} = Acc) ->
-    Existing = erloom_chain:value(Path, State, []),
+    Existing = erloom_chain:value(State, Path, []),
     Diff = realloc_nodes(Path, Existing, State),
     accumulate_allocation(Path, Diff, Acc).
 
@@ -900,6 +965,12 @@ do_adjust_subs({Which, Trigger, Iter, BMax}, State) ->
     do_adjust_subs(retry, Which, Trigger, Iter, BMax, State).
 
 do_adjust_subs(Phase, Which, Trigger, Iter, BMax, State) ->
+    %% XXX: the realloc operation MUST have the following semantics (but does not currently):
+    %%       if the value at path is undefined - take no effect, that is, leave it undefined
+    %%       that is, realloc is predicated on existence of sub, if sub does not exist: do nothing
+    %%      this is how we avoid race conditions with removal of subs (i.e. delete always takes precedence)
+    %%      right now we would allocate new nodes for a deleted sub if we started realloc beforehand
+    %%       it's not dangerous but it wastes some resources and violates the meaning of removal
     {Retry, _} =
         util:chunk(
           fun (Chunk, {R, S}) when Phase =:= initial ->
@@ -941,10 +1012,10 @@ do_control_sites({Sub, {[], [_|_] = New}}, State) ->
 do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
     %% we can stop as soon as the loom accepts responsibility for the change
     %% once the motion passes it will take effect, eventually
-    %% we check the new nodes to see if the value is set, and submit to the old nodes if it is not
+    %% we rely on the old nodes to make the transition
     SubSpec = subordinate_spec(State, Sub),
-    case loom:deliver(New, SubSpec, #{type => command, verb => lookup, path => elect}) of
-        {error, deliver, _} ->
+    case loom:deliver(Old, SubSpec, #{type => command, verb => lookup, path => elect}) of
+        {error, delivery, _} ->
             {retry, {10, seconds}, {undeliverable, {start, SubSpec}}};
         {ok, {ok, {_, Elect = #{current := Current}}}, #{dstat := #{node := Probed}}} ->
             %% check if the current conf is what we want already
@@ -961,15 +1032,24 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
                         {ok, {ok, _}, _} ->
                             {done, {ok, {true, {SubSpec, New}}}};
                         {ok, {retry, stopped}, _} ->
-                            %% if an old node is stopped, the group config must have already changed
-                            %% either our change was successful, or someone else interfered
-                            %% in either case we are done, if someone else is interfering, its their problem
                             {done, {ok, {true, {SubSpec, New}}}};
-                        {_, Response, #{dstat := #{node := Node}}} ->
+                        {ok, {retry, waiting}, _} ->
+                            {done, {ok, {true, {SubSpec, New}}}};
+                        {_, Response, #{dstat := DStat}} ->
                             %% either the motion is pending or it failed, either way try again
-                            {retry, {10, seconds}, {wait, {Node, Response}}}
+                            {retry, {10, seconds}, {wait, {Response, DStat}}}
                     end
-            end
+            end;
+        {ok, {retry, stopped}, _} ->
+            %% if an old node is stopped, the group config must have already changed
+            %% either our change was successful, or someone else interfered
+            %% in either case we are done, if someone else is interfering, its their problem
+            {done, {ok, {true, {SubSpec, New}}}};
+        {ok, {retry, waiting}, _} ->
+            %% its possible the node was stopped a long time ago and wiped itself
+            %% its also possible the node was never started, but not unless someone interfered
+            %% treat the same as a stop, if someone interfered, not our problem
+            {done, {ok, {true, {SubSpec, New}}}}
     end;
 do_control_sites({Sub, _}, State) ->
     %% there are no old nodes and no new ones: weird, but someone must have asked us to do it
@@ -1027,27 +1107,49 @@ do_transfer_name({_, {Same, Same}}, _) ->
     {done, {false, Same}};
 do_transfer_name({[SubType, SubName], {undefined, New}}, State) ->
     %% just give control to the new subordinate, since there is no old one
-    do_micromanage(State, {id, SubType, New}, [names, SubName], true);
+    %% use obtain because this is how a sub gets initially 'created'
+    %% NB: internal only - normally, bad things can happen if obtaining by id
+    do_micromanage(State, {id, SubType, New}, obtain, [names, SubName], true);
 do_transfer_name({[SubType, SubName], {Old, undefined}}, State) ->
     %% just revoke the control from the old subordinate, since there is no new one
-    do_micromanage(State, {id, SubType, Old}, [names, SubName], false);
+    %% use lookup for the old sub, because it may have been removed if it doesn't exist
+    do_micromanage(State, {id, SubType, Old}, lookup, [names, SubName], false);
 do_transfer_name({[SubType, SubName], {Old, New}}, State) ->
     %% transfer control of the name to the new subordinate from the old one, if any
     %% the new subordinate relieves the old one of duty, and copies anything it needs
     %% during the transition period they might both think they own the name, which is fine
     %% the agency only points to one of them (who knows how long it takes for them to find out)
     %% NB: return the new {SubSpec, Sites}, not the old
-    case do_micromanage(State, {id, SubType, New}, [names, SubName], true) of
+    case do_micromanage(State, {id, SubType, New}, obtain, [names, SubName], true) of
         {done, Return} ->
-            do_micromanage(State, {id, SubType, Old}, [names, SubName], false, Return);
+            do_micromanage(State, {id, SubType, Old}, lookup, [names, SubName], false, Return);
         Other ->
             Other
     end.
 
-do_micromanage(Manager, Subish, Path, Value) ->
-    do_micromanage(Manager, Subish, Path, Value, undefined).
+do_micromanage(Manager, Subish, Mechanism, Path, Value) ->
+    do_micromanage(Manager, Subish, Mechanism, Path, Value, undefined).
 
-do_micromanage(Manager, Subish, Path, Value, Return) ->
+do_micromanage(#{spec := Spec}, {id, SubType, SubId}, obtain, Path, Value, Return) ->
+    case obtain({Spec, {id, SubType, SubId}}) of
+        {ok, {_, {SubSpec, Sites}}, _} ->
+            do_micromanage(Spec, SubSpec, Sites, Path, Value, Return);
+        {error, Reason, _} ->
+            %% we couldn't talk to the manager, should only happen under heavy load
+            {retry, {10, seconds}, {unreachable, {obtain, Spec}, Reason}}
+    end;
+do_micromanage(#{spec := Spec}, {id, SubType, SubId}, lookup, Path, Value, Return) ->
+    case lookup({Spec, {id, SubType, SubId}}) of
+        {ok, {false, undefined}, _} ->
+            {done, Return};
+        {ok, {_, {SubSpec, SubSites}}, _} ->
+            do_micromanage(Spec, SubSpec, SubSites, Path, Value, Return);
+        {error, Reason, _} ->
+            %% we couldn't talk to the manager, should only happen under heavy load
+            {retry, {10, seconds}, {unreachable, {lookup, Spec}, Reason}}
+    end;
+
+do_micromanage(_, SubSpec, Sites, Path, Value, Return) ->
     %% probe the path first to prevent duplicating requests
     %% then wait, modify, or retry as needed
     %% NB: always returns the {SubSpec, Sites} as needed by create
@@ -1057,17 +1159,17 @@ do_micromanage(Manager, Subish, Path, Value, Return) ->
       verb => lookup,
       path => Path
      },
-    case relay(Manager, Subish, Probe) of
+    case loom:deliver(Sites, SubSpec, Probe) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
-            {retry, {10, seconds}, {unreachable, {probe, Subish}, Reason}};
+            {retry, {10, seconds}, {unreachable, {probe, SubSpec}, Reason}};
         {ok, {wait, Reason}, #{dstat := #{node := Node}}} ->
             %% a change is pending
             {retry, {10, seconds}, {wait, {Node, Reason}}};
-        {ok, {ok, {_, Value}}, #{dstat := #{spec := SubSpec, nodes := Sites}}} ->
+        {ok, {ok, {_, Value}}, _} ->
             %% the value has already been set, all done
             {done, util:def(Return, {ok, {true, {SubSpec, Sites}}})};
-        {ok, {ok, _}, #{dstat := #{spec := SubSpec, node := Node, nodes := Sites}}} ->
+        {ok, {ok, _}, #{dstat := #{node := Node}}} ->
             %% the value is something else, try sending
             Modify = #{
               type => tether,
@@ -1080,5 +1182,51 @@ do_micromanage(Manager, Subish, Path, Value, Return) ->
                     {done, util:def(Return, {ok, {true, {SubSpec, Sites}}})};
                 Response ->
                     {retry, {10, seconds}, {wait, {Node, Response}}}
+            end
+    end.
+
+do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
+    %% Removal is fairly complicated, especially due to potential race conditions
+    %% To do it correctly we must (in order):
+    %%  1. Make the sub catatonic: it should no longer accept new names (aliasing)
+    %%      XXX: we don't currently do this, but to be safe we MUST
+    %%  2. Drop aliases: remove all names which are associated with the sub, even old ones
+    %%  3. Free: stop the sub, it should in turn free all its resources when stopped
+    %%      XXX: currently managers don't free their resources when stopped, they should
+    SubSpec = subordinate_spec(State, Sub),
+    case loom:deliver(Sites, SubSpec, #{type => command, verb => lookup, path => names}) of
+        {error, Reason, _} ->
+            %% subordinate could not be contacted
+            {retry, {10, seconds}, {unreachable, {names, Sub}, Reason}};
+        {ok, {retry, stopped}, _} ->
+            %% subordinate stopped already, strange but possible
+            {done, ok};
+        {ok, {retry, waiting}, _} ->
+            %% subordinate never started (or more likely stopped & wiped)
+            %% treat the same as stopped, given what we know
+            {done, ok};
+        {ok, {ok, {_, []}}, _} ->
+            %% exit early if we never had any names
+            do_control_sites({Sub, {Sites, []}}, State);
+        {ok, {ok, {_, Names}}, _} ->
+            %% get rid of all names, since even old ones may reference us in their stack
+            %% try to unalias them all at once
+            Batch = #{
+              type => tether,
+              kind => batch,
+              value =>
+                  [#{
+                      verb => accrue,
+                      path => [sub_names, SubType, Name],
+                      value => {except, [SubId]}
+                    } || {Name, _} <- Names]
+             },
+            case loom:call(State, Batch) of
+                {ok, _} ->
+                    %% stop the sub
+                    do_control_sites({Sub, {Sites, []}}, State);
+                _ ->
+                    %% couldn't kill the aliases, retry
+                    {retry, {10, seconds}, inalienable}
             end
     end.

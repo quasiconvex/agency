@@ -153,15 +153,6 @@ verify_message(Message = #{type := conn, token := Token}, State) ->
         false ->
             {error, not_authorized, State}
     end;
-verify_message(Message = #{scope := Scope}, State) ->
-    %% if the message is accepted, we assume we are supposed to handle it
-    %% handlers must match on the scope if they want to limit access using roles
-    case util:has(util:get(State, roles, []), Scope) of
-        true ->
-            callback(State, {verify_message, 2}, [Message, State], {ok, Message, State});
-        false ->
-            {error, not_authorized, State}
-    end;
 verify_message(Message, State) ->
     callback(State, {verify_message, 2}, [Message, State], {ok, Message, State}).
 
