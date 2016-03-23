@@ -130,7 +130,9 @@
          callback/4]).
 
 %% manager impl helpers
--export([list_sub_names/2]).
+-export([iter_subordinates/2,
+         list_sub_names/1,
+         list_sub_names/2]).
 
 %% client
 
@@ -186,7 +188,7 @@ ids({Manager, {name, SubType, SubName}}, Ctx) ->
             type => command,
             kind => chain,
             verb => lookup,
-            path => [sub_names, SubType, SubName]
+            path => [sub, names, SubType, SubName]
            }, Ctx).
 
 sites(Which) ->
@@ -197,7 +199,7 @@ sites({Manager, {id, SubType, SubId}}, Ctx) ->
             type => command,
             kind => chain,
             verb => lookup,
-            path => [sub_sites, SubType, SubId]
+            path => [sub, sites, SubType, SubId]
            }, Ctx).
 
 alias(Manager, SubType, SubName, SubId) ->
@@ -207,7 +209,7 @@ alias(Manager, SubType, SubName, SubId, Ctx) when is_binary(SubName), is_binary(
     patch(Manager, #{
             type => tether,
             verb => accrue,
-            path => [sub_names, SubType, SubName],
+            path => [sub, names, SubType, SubName],
             value =>
                 case util:get(Ctx, weak) of
                     true ->
@@ -224,7 +226,7 @@ unalias(Manager, SubType, SubName, SubId, Ctx) when is_binary(SubName), is_binar
     patch(Manager, #{
             type => tether,
             verb => accrue,
-            path => [sub_names, SubType, SubName],
+            path => [sub, names, SubType, SubName],
             value => {drop, SubId}
            }, Ctx).
 
@@ -238,7 +240,7 @@ lookup_pool(Manager, Ctx) ->
             type => command,
             kind => chain,
             verb => lookup,
-            path => pool
+            path => [pool]
            }, Ctx).
 
 change_pool(Manager, Change) ->
@@ -248,7 +250,7 @@ change_pool(Manager, Change, Ctx) ->
     patch(Manager, #{
             type => tether,
             verb => accrue,
-            path => pool,
+            path => [pool],
             value => Change
            }, Ctx).
 
@@ -269,7 +271,7 @@ report_pool(Manager, Ctx) ->
     patch(Manager, #{
             type => command,
             verb => lookup,
-            path => pool_info
+            path => [pool_info]
            }, Ctx).
 
 get_replication_factor(Manager, SubType) ->
@@ -425,24 +427,18 @@ opts(Spec) ->
     maps:merge(Defaults, callback(Spec, {opts, 1}, [Spec], #{})).
 
 keep(State) ->
-    %% XXX some of these should be lmdbs or dets tables or something
+    %% NB: sub has {names, sites, pools}
     Builtins = maps:with([pool,
                           replication,
-                          utilization,
-                          sub_names,
-                          sub_sites,
-                          sub_pools], State),
+                          utilization], State),
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
 init(State) ->
-    %% XXX could load dbs, etc
     State1 = State#{
                pool => util:get(State, pool, {[], undefined}),
                replication => util:get(State, replication, #{}),
                utilization => util:get(State, utilization, #{}),
-               sub_names => util:get(State, sub_names, #{}),
-               sub_sites => util:get(State, sub_sites, #{}),
-               sub_pools => util:get(State, sub_pools, #{})
+               sub => jfdb:open(loom:path(sub, State))
               },
     callback(State1, {init, 1}, [State1], State1).
 
@@ -482,13 +478,13 @@ handle_message(#{type := request, kind := resources, path := Path, value := Have
 handle_message(Message, Node, IsNew, State) ->
     callback(State, {handle_message, 4}, [Message, Node, IsNew, State], State).
 
-command_called(#{verb := accrue, path := pool}, Node, true, State) ->
+command_called(#{verb := accrue, path := [pool]}, Node, true, State) ->
     %% make sure all affected subordinates are updated to reflect the change
     %% we need to check both if their sites OR pools are affected by the change
     %% NB: if we inverted ids per node, we wouldn't have to check *all* subordinates
     %%     either way this is just a pool-sized factor in a time-space tradeoff
-    Former = erloom_chain:value(State, former, []),
-    Latter = erloom_chain:value(State, pool, []),
+    Former = erloom_chain:value(State, [former], []),
+    Latter = erloom_chain:value(State, [pool], []),
     Task = {fun ?MODULE:do_adjust_subs/2, {all, {pool, util:diff(Former, Latter)}}},
     loom:suture_task(adjust, Node, Task, cache_pool_info(State));
 
@@ -500,7 +496,7 @@ command_called(#{verb := accrue, path := [replication, SubType]}, Node, true, St
 
 command_called(#{verb := lookup, what := {name, SubType, SubName}}, _, _, State)
   when is_binary(SubName) ->
-    case erloom_chain:value(State, [sub_names, SubType, SubName]) of
+    case erloom_chain:value(State, [sub, names, SubType, SubName]) of
         A when A =:= undefined; A =:= [] ->
             State#{response => {ok, {false, undefined}}};
         [SubId|_] ->
@@ -509,12 +505,12 @@ command_called(#{verb := lookup, what := {name, SubType, SubName}}, _, _, State)
 
 command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
   when is_binary(SubName) ->
-    case erloom_chain:value(State, [sub_names, SubType, SubName]) of
+    case erloom_chain:value(State, [sub, names, SubType, SubName]) of
         A when A =:= undefined; A =:= [] ->
             %% information will be propagated through the chain motion itself
             %% we dont need yet another emit, unless we want to choose the value later
             SubId = make_subordinate_id(SubType, SubName),
-            Message = #{verb => accrue, path => [sub_names, SubType, SubName], value => {init, SubId}},
+            Message = #{verb => accrue, path => [sub, names, SubType, SubName], value => {init, SubId}},
             loom:wait(loom:make_tether(Message, State));
         [SubId|_] ->
             respond_spec_sites(SubType, SubId, State)
@@ -522,7 +518,7 @@ command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
 
 command_called(#{verb := vacate, what := {name, SubType, SubName}}, Node, DidChange, State)
   when is_binary(SubName) ->
-    case erloom_chain:value(State, [sub_names, SubType, SubName]) of
+    case erloom_chain:value(State, [sub, names, SubType, SubName]) of
         A when A =:= undefined; A =:= [] ->
             State#{response => {ok, {false, undefined}}};
         [SubId|_] ->
@@ -530,11 +526,11 @@ command_called(#{verb := vacate, what := {name, SubType, SubName}}, Node, DidCha
             command_called(#{verb => vacate, what => {id, SubType, SubId}}, Node, DidChange, State)
     end;
 
-command_called(#{verb := accrue, path := [sub_names|Sub_]}, Node, true, State) ->
+command_called(#{verb := accrue, path := [sub, names|Sub_]}, Node, true, State) ->
     %% either a new name has been created or an alias was created or destroyed
     %% subordinates must reflect the new ownership
-    Transfer = {util:first(erloom_chain:value(State, former, [])),
-                util:first(erloom_chain:value(State, [sub_names|Sub_], []))},
+    Transfer = {util:first(erloom_chain:value(State, [former], [])),
+                util:first(erloom_chain:value(State, [sub, names|Sub_], []))},
     Task = {fun ?MODULE:do_transfer_name/2, {Sub_, Transfer}},
     loom:wait(loom:suture_task({name, Sub_}, Node, Task, State));
 
@@ -544,10 +540,10 @@ command_called(#{verb := lookup, what := {id, SubType, SubId}}, _, _, State)
 
 command_called(#{verb := obtain, what := {id, SubType, SubId}}, _, _, State)
   when is_binary(SubId) ->
-    case erloom_chain:value(State, [sub_sites, SubType, SubId]) of
+    case erloom_chain:value(State, [sub, sites, SubType, SubId]) of
         undefined ->
             %% get permission to change first, then choose the value and emit
-            Message = #{verb => create, path => [sub_sites, SubType, SubId], value => []},
+            Message = #{verb => create, path => [sub, sites, SubType, SubId], value => []},
             loom:wait(loom:make_tether(Message, State));
         Sites ->
             respond_spec_sites(SubType, SubId, Sites, State)
@@ -555,7 +551,7 @@ command_called(#{verb := obtain, what := {id, SubType, SubId}}, _, _, State)
 
 command_called(#{verb := vacate, what := {id, SubType, SubId}}, _, _, State)
   when is_binary(SubId) ->
-    case erloom_chain:value(State, [sub_sites, SubType, SubId]) of
+    case erloom_chain:value(State, [sub, sites, SubType, SubId]) of
         undefined ->
             State#{response => {ok, {false, undefined}}};
         _Sites ->
@@ -568,64 +564,64 @@ command_called(#{verb := vacate, what := {id, SubType, SubId}}, _, _, State)
               value => [#{
                            type => command,
                            verb => remove,
-                           path => [sub_sites, SubType, SubId]
+                           path => [sub, sites, SubType, SubId]
                          },
                         #{
                            type => command,
                            verb => remove,
-                           path => [sub_pools, SubType, SubId]
+                           path => [sub, pools, SubType, SubId]
                          }]
              },
             loom:wait(loom:make_tether(Message, State))
     end;
 
-command_called(#{verb := create, path := [sub_sites|Sub]}, Node, true, State) when Node =:= node() ->
+command_called(#{verb := create, path := [sub, sites|Sub]}, Node, true, State) when Node =:= node() ->
     %% subordinate created: choose sites, emit a command to communicate the result
     %% we suture because we depend on many messages (votes), not just this one
-    Nodes = choose_nodes([sub_sites|Sub], State),
+    Nodes = choose_nodes([sub, sites|Sub], State),
     Boiler = #{type => command, kind => chain, verb => accrue, value => {'=', Nodes}},
-    State1 = loom:suture_yarn(Boiler#{path => [sub_sites|Sub]}, State),
+    State1 = loom:suture_yarn(Boiler#{path => [sub, sites|Sub]}, State),
     State2 =
         case subordinate_is_manager(State1, Sub) of
             true ->
                 %% if its a manager, also choose an initial pool
                 %% NB: for now this is always the same as sites, but could be independent
-                loom:suture_yarn(Boiler#{path => [sub_pools|Sub]}, State1);
+                loom:suture_yarn(Boiler#{path => [sub, pools|Sub]}, State1);
             false ->
                 State1
         end,
     loom:wait(State2); %% NB: sub_sites task will return
 
-command_called(#{verb := accrue, path := [sub_sites|Sub]}, Node, true, State) ->
+command_called(#{verb := accrue, path := [sub, sites|Sub]}, Node, true, State) ->
     %% time to actually change the sites for the subordinate, reflect changes in stats
     %% NB: does not return, which is fine as it is only used from create / batch updates
-    Former = erloom_chain:value(State, former, []),
-    Latter = erloom_chain:value(State, [sub_sites|Sub], []),
+    Former = erloom_chain:value(State, [former], []),
+    Latter = erloom_chain:value(State, [sub, sites|Sub], []),
     Task = {fun ?MODULE:do_control_sites/2, {Sub, {Former, Latter}}},
-    State1 = pool_allocated([sub_sites|Sub], util:diff(Former, Latter), State),
+    State1 = pool_allocated([sub, sites|Sub], util:diff(Former, Latter), State),
     loom:wait(loom:stitch_task({sub, Sub}, Node, Task, State1));
 
-command_called(#{verb := accrue, path := [sub_pools|Sub]}, Node, true, State) ->
+command_called(#{verb := accrue, path := [sub, pools|Sub]}, Node, true, State) ->
     %% time to actually change the pool for the subordinate, reflect changes in stats
     %% NB: does not return, which is fine as it is only used from create / batch updates
     %%     the task can return as it is sure to run after the 'do_control_sites' on create
-    Former = erloom_chain:value(State, former, []),
-    Latter = erloom_chain:value(State, [sub_pools|Sub], []),
+    Former = erloom_chain:value(State, [former], []),
+    Latter = erloom_chain:value(State, [sub, pools|Sub], []),
     Task = {fun ?MODULE:do_assign_pool/2, {Sub, {Former, Latter}}},
-    State1 = pool_allocated([sub_pools|Sub], util:diff(Former, Latter), State),
+    State1 = pool_allocated([sub, pools|Sub], util:diff(Former, Latter), State),
     loom:wait(loom:stitch_task({sub, Sub}, Node, Task, State1));
 
-command_called(#{verb := remove, path := [sub_sites|Sub]}, Node, true, State) ->
+command_called(#{verb := remove, path := [sub, sites|Sub]}, Node, true, State) ->
     %% time to actually get rid of the sub, run the task and reflect changes in stats
-    Former = erloom_chain:value(State, former, []),
+    Former = erloom_chain:value(State, [former], []),
     Task = {fun ?MODULE:do_remove_sub/2, {Sub, Former}},
-    State1 = pool_allocated([sub_sites|Sub], {[], Former}, State),
+    State1 = pool_allocated([sub, sites|Sub], {[], Former}, State),
     loom:wait(loom:stitch_task({sub, Sub}, Node, Task, State1));
 
-command_called(#{verb := remove, path := [sub_pools|Sub]}, _, true, State) ->
+command_called(#{verb := remove, path := [sub, pools|Sub]}, _, true, State) ->
     %% just reflect changes in stats, everything else handled when the sites are removed
-    Former = erloom_chain:value(State, former, []),
-    State1 = pool_allocated([sub_pools|Sub], {[], Former}, State),
+    Former = erloom_chain:value(State, [former], []),
+    State1 = pool_allocated([sub, pools|Sub], {[], Former}, State),
     loom:wait(State1); %% NB: should've been called in vacate batch, task will return
 
 command_called(Command, Node, DidChange, State) ->
@@ -668,7 +664,7 @@ wants_relocate(AwayFrom, State) ->
               end,
     callback(State, {wants_relocate, 2}, Default).
 
-wants_resources(Path = [sub_pools|_], HaveWant = {Have, Want}, State) ->
+wants_resources(Path = [sub, pools|_], HaveWant = {Have, Want}, State) ->
     %% called by the manager when a subordinate is running out of pooled resources
     %% (or in theory also when the subordinate has too many resources)
     %% we may in turn request more resources from our boss, if we have one
@@ -712,8 +708,8 @@ maybe_request_resources(Reason, State = #{spec := Spec}) ->
             out_of_resources(Reason, State);
         #manager{boss=Boss, id=SubId, mod=SubType} ->
             %% we have a boss: ask to expand our pool (by 1 for now)
-            Have = length(erloom_chain:value(State, pool, [])),
-            ok = request_resources(Boss, [sub_pools, SubType, SubId], {Have, Have + 1}),
+            Have = length(erloom_chain:value(State, [pool], [])),
+            ok = request_resources(Boss, [sub, pools, SubType, SubId], {Have, Have + 1}),
             State
     end.
 
@@ -747,7 +743,7 @@ cache_pool_info(State = #{utilization := U}) ->
       pool_info =>
           lists:foldl(fun (Node, Acc) ->
                               Acc#{Node => util:get(U, Node, {0, {0, 0}})}
-                      end, #{}, erloom_chain:value(State, pool))
+                      end, #{}, erloom_chain:value(State, [pool]))
      }.
 
 pool_info(#{pool_info := PoolInfo}) ->
@@ -755,11 +751,11 @@ pool_info(#{pool_info := PoolInfo}) ->
 pool_info(_State) ->
     #{}.
 
-pool_allocated([sub_sites|_], {Add, Rem}, State = #{utilization := U}) ->
+pool_allocated([sub, sites|_], {Add, Rem}, State = #{utilization := U}) ->
     U1 = lists:foldl(u9n_accruer(sites, {'+', 1}), U, Add),
     U2 = lists:foldl(u9n_accruer(sites, {'-', 1}), U1, Rem),
     cache_pool_info(State#{utilization => U2});
-pool_allocated([sub_pools|_], {Add, Rem}, State = #{utilization := U}) ->
+pool_allocated([sub, pools|_], {Add, Rem}, State = #{utilization := U}) ->
     U1 = lists:foldl(u9n_accruer(pools, {'+', 1}), U, Add),
     U2 = lists:foldl(u9n_accruer(pools, {'-', 1}), U1, Rem),
     cache_pool_info(State#{utilization => U2}).
@@ -775,7 +771,7 @@ u9n_accruer(Field, Op) ->
     fun (Node, U) -> accrue_u9n(U, Node, Field, Op) end.
 
 accrue_u9n(Utilization, Node, Field, Op) ->
-    util:modify(Utilization, Node,
+    util:modify(Utilization, [Node],
                 fun (undefined) when Field =:= sites ->
                         {0, {util:op(0, Op), 0}};
                     (undefined) when Field =:= pools ->
@@ -793,7 +789,7 @@ accrue_u9n(Utilization, Node, Field, Op) ->
 %% common helpers
 
 respond_spec_sites(SubType, SubId, State) ->
-    Sites = erloom_chain:value(State, [sub_sites, SubType, SubId]),
+    Sites = erloom_chain:value(State, [sub, sites, SubType, SubId]),
     respond_spec_sites(SubType, SubId, Sites, State).
 
 respond_spec_sites(_, _, undefined, State) ->
@@ -812,24 +808,30 @@ diff_op({Add, Rem}) ->
     [{'+', Add}, {'-', Rem}].
 
 iter_subordinates(all, State) ->
-    %% XXX: would be nice to return a lazy iterator when we add lmdb support
+    %% XXX: would be nice to push the fold to db
+    %%      if only NIFs supported calling erlang functions
     util:fold(
       fun ({SubType, BySubId}, Acc) ->
               util:fold(
                 fun ({SubId, _}, A) ->
-                        [{SubType, SubId}|A]
+                        [{util:atom(SubType), SubId}|A]
                 end, Acc, BySubId)
-      end, [], util:lookup(State, [sub_sites], []));
+      end, [], util:lookup(State, [sub, sites], []));
 iter_subordinates({type, SubType}, State) ->
+    %% XXX: see above
     util:fold(
       fun ({SubId, _}, Acc) ->
               [{SubType, SubId}|Acc]
-      end, [], util:lookup(State, [sub_sites, SubType], [])).
+      end, [], util:lookup(State, [sub, sites, SubType], [])).
+
+list_sub_names(State) ->
+    list_sub_names(fun (_) -> true end, State).
 
 list_sub_names(FilterType, State) ->
-    %% XXX: affected similarly by lmdb
+    %% XXX: see above
     util:fold(
-      fun ({SubType, BySubName}, Acc) ->
+      fun ({SubTypeBin, BySubName}, Acc) ->
+              SubType = util:atom(SubTypeBin),
               case FilterType(SubType) of
                   true ->
                       util:fold(
@@ -843,7 +845,7 @@ list_sub_names(FilterType, State) ->
                   false ->
                       Acc
               end
-      end, [], util:lookup(State, [sub_names], [])).
+      end, [], util:lookup(State, [sub, names], [])).
 
 ranked_nodes(PoolInfo) ->
     util:vals(lists:keysort(1, util:index(PoolInfo))).
@@ -854,11 +856,11 @@ choose_nodes(Path, State) ->
 choose_nodes(Path, Existing, State) ->
     util:edit(Existing, realloc_nodes(Path, Existing, State)).
 
-realloc_nodes(Path = [sub_sites, SubType, _], Existing, State) ->
+realloc_nodes(Path = [sub, sites, SubType, _], Existing, State) ->
     %% the number of sites we want is always determined by the replication factor
     K = erloom_chain:value(State, [replication, SubType]),
     realloc_nodes(Path, Existing, K, State);
-realloc_nodes(Path = [sub_pools|_], Existing, State) ->
+realloc_nodes(Path = [sub, pools|_], Existing, State) ->
     %% when we reallocate a sub_pool, we aim to keep it the same size
     realloc_nodes(Path, Existing, length(Existing), State).
 
@@ -887,10 +889,10 @@ realloc_nodes(_, _, _, _, _, Gone) ->
 maybe_realloc({relocate, AwayFrom}, Path, Acc) ->
     %% a relocate potentially touches both subordinate sites and pools
     potential_realloc(Path, AwayFrom, Acc);
-maybe_realloc(_, Path = [sub_sites|_], Acc) ->
+maybe_realloc(_, Path = [sub, sites|_], Acc) ->
     %% any trigger can cause a potential realloc of sites
     potential_realloc(Path, Acc);
-maybe_realloc({pool, {_, Rem}}, Path = [sub_pools|_], Acc) when Rem =/= [] ->
+maybe_realloc({pool, {_, Rem}}, Path = [sub, pools|_], Acc) when Rem =/= [] ->
     %% only a pool shrinkage triggers potential realloc of subordinate pools
     potential_realloc(Path, Acc);
 maybe_realloc(_Trigger, _Path, Acc) ->
@@ -978,8 +980,8 @@ do_adjust_subs(Phase, Which, Trigger, Iter, BMax, State) ->
                   {Allocs, S1} =
                       util:fold(
                         fun ({SubType, SubId}, A) ->
-                                A1 = maybe_realloc(Trigger, [sub_sites, SubType, SubId], A),
-                                __ = maybe_realloc(Trigger, [sub_pools, SubType, SubId], A1)
+                                A1 = maybe_realloc(Trigger, [sub, sites, SubType, SubId], A),
+                                __ = maybe_realloc(Trigger, [sub, pools, SubType, SubId], A1)
                         end, {[], S}, Chunk),
                   attempt_pushing_allocations(Allocs, {R, S1});
               (Allocs, {R, S}) ->
@@ -1014,7 +1016,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
     %% once the motion passes it will take effect, eventually
     %% we rely on the old nodes to make the transition
     SubSpec = subordinate_spec(State, Sub),
-    case loom:deliver(Old, SubSpec, #{type => command, verb => lookup, path => elect}) of
+    case loom:deliver(Old, SubSpec, #{type => command, verb => lookup, path => [elect]}) of
         {error, delivery, _} ->
             {retry, {10, seconds}, {undeliverable, {start, SubSpec}}};
         {ok, {ok, {_, Elect = #{current := Current}}}, #{dstat := #{node := Probed}}} ->
@@ -1025,7 +1027,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
                     {done, {ok, {false, {SubSpec, New}}}};
                 {_, #{value := {'=', New}}, _} ->
                     %% wait to see if it passes
-                    {retry, {10, seconds}, {wait, {Probed, pending}}};
+                    {retry, {10, seconds}, {wait, {Probed, control, pending}}};
                 {_, #{}, _} ->
                     %% has another value, we ought to set it
                     case loom:deliver(Old, SubSpec, #{type => move, kind => conf, value => {'=', New}}) of
@@ -1037,7 +1039,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
                             {done, {ok, {true, {SubSpec, New}}}};
                         {_, Response, #{dstat := DStat}} ->
                             %% either the motion is pending or it failed, either way try again
-                            {retry, {10, seconds}, {wait, {Response, DStat}}}
+                            {retry, {10, seconds}, {wait, {Response, control, DStat}}}
                     end
             end;
         {ok, {retry, stopped}, _} ->
@@ -1066,12 +1068,12 @@ do_assign_pool({Sub, {Old, New}}, State) ->
     %% probe the path first to prevent duplicating requests
     %% then wait, modify, or retry as needed
     SubSpec = subordinate_spec(State, Sub),
-    Sites = erloom_chain:value(State, [sub_sites|Sub], []),
+    Sites = erloom_chain:value(State, [sub, sites|Sub], []),
     Probe = #{
       type => command,
       kind => probe,
       verb => lookup,
-      path => pool
+      path => [pool]
      },
     case loom:deliver(Sites, SubSpec, Probe) of
         {error, Reason, _} ->
@@ -1079,7 +1081,7 @@ do_assign_pool({Sub, {Old, New}}, State) ->
             {retry, {10, seconds}, {unreachable, {probe, SubSpec}, Reason}};
         {ok, {wait, Reason}, #{dstat := #{node := Node}}} ->
             %% a change is pending
-            {retry, {10, seconds}, {wait, {Node, Reason}}};
+            {retry, {10, seconds}, {wait, {Node, {assign, deliver}, Reason}}};
         {ok, {ok, {_, New}}, _} ->
             %% the value has already been set, all done
             {done, ok};
@@ -1088,14 +1090,14 @@ do_assign_pool({Sub, {Old, New}}, State) ->
             Accrue = #{
               type => tether,
               verb => accrue,
-              path => pool,
+              path => [pool],
               value => {edit, util:diff(Old, New)}
              },
             case loom:rpc(Node, SubSpec, Accrue) of
                 {ok, {_, New}} ->
                     {done, ok};
                 Response ->
-                    {retry, {10, seconds}, {wait, {Node, Response}}}
+                    {retry, {10, seconds}, {wait, {Node, {assign, rpc}, Response}}}
             end
     end.
 
@@ -1165,7 +1167,7 @@ do_micromanage(_, SubSpec, Sites, Path, Value, Return) ->
             {retry, {10, seconds}, {unreachable, {probe, SubSpec}, Reason}};
         {ok, {wait, Reason}, #{dstat := #{node := Node}}} ->
             %% a change is pending
-            {retry, {10, seconds}, {wait, {Node, Reason}}};
+            {retry, {10, seconds}, {wait, {Node, {micro, deliver}, Reason}}};
         {ok, {ok, {_, Value}}, _} ->
             %% the value has already been set, all done
             {done, util:def(Return, {ok, {true, {SubSpec, Sites}}})};
@@ -1181,7 +1183,7 @@ do_micromanage(_, SubSpec, Sites, Path, Value, Return) ->
                 {ok, {_, Value}} ->
                     {done, util:def(Return, {ok, {true, {SubSpec, Sites}}})};
                 Response ->
-                    {retry, {10, seconds}, {wait, {Node, Response}}}
+                    {retry, {10, seconds}, {wait, {Node, {micro, rpc}, Response}}}
             end
     end.
 
@@ -1194,7 +1196,7 @@ do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
     %%  3. Free: stop the sub, it should in turn free all its resources when stopped
     %%      XXX: currently managers don't free their resources when stopped, they should
     SubSpec = subordinate_spec(State, Sub),
-    case loom:deliver(Sites, SubSpec, #{type => command, verb => lookup, path => names}) of
+    case loom:deliver(Sites, SubSpec, #{type => command, verb => lookup, path => [names]}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
             {retry, {10, seconds}, {unreachable, {names, Sub}, Reason}};
@@ -1217,7 +1219,7 @@ do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
               value =>
                   [#{
                       verb => accrue,
-                      path => [sub_names, SubType, Name],
+                      path => [sub, names, SubType, Name],
                       value => {except, [SubId]}
                     } || {Name, _} <- Names]
              },

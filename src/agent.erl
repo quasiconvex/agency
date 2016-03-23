@@ -30,9 +30,7 @@
          id/1,
          which/1,
          connect/2,
-         connect/3,
-         patch/2,
-         patch/3]).
+         connect/3]).
 
 %% agent mod helpers
 -export([is_valid_token/2,
@@ -99,9 +97,6 @@ connect(Specish, As, Ctx) ->
                      }, util:select(Ctx, [since, token])),
     patch(Specish, Message, Ctx).
 
-patch(Specish, Message) ->
-    patch(Specish, Message, #{}).
-
 patch(Specish, Message, Ctx) ->
     loom:patch(Specish, Message, Ctx).
 
@@ -123,7 +118,7 @@ vsn(Spec) ->
     maps:merge(callback(Spec, {vsn, 1}, [Spec], #{}), #{}).
 
 find(Specish, Ctx) ->
-    manager:find_cache(which(Specish), get_or_create, agent, Ctx).
+    manager:find_cache(which(Specish), get_or_create, [agent], Ctx).
 
 home(Spec) ->
     callback(Spec, {home, 1}, [Spec]).
@@ -137,10 +132,11 @@ keep(State) ->
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
 init(State) ->
-    State#{
-      roles => util:get(State, roles, []),
-      tokens => util:get(State, tokens, #{})
-     }.
+    State1 = State#{
+               roles => util:get(State, roles, []),
+               tokens => util:get(State, tokens, #{})
+              },
+    callback(State1, {init, 1}, [State1], State1).
 
 waken(State) ->
     State1 = purge_tokens(State),

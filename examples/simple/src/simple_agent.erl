@@ -23,7 +23,7 @@ patch(Name, Message) ->
     patch(Name, Message, #{}).
 
 patch(Name, Message, Ctx) ->
-    agent:patch({simple_agency:spec(), {name, ?MODULE, Name}}, Message, Ctx).
+    loom:patch({simple_agency:spec(), {name, ?MODULE, Name}}, Message, Ctx).
 
 spec(AgentId) ->
     spec(simple_agency:spec(), AgentId).
