@@ -16,25 +16,25 @@ a() ->
     loom:seed(spec()).
 
 b() ->
-    {ok, _, _} = rep(3),
-    {ok, _, _} = manager:change_pool(spec(), {'+', [nd("rst"), nd("uvw"), nd("xyz")]}),
-    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"jared">>}}),
-    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"jeff">>}}),
-    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"thomas">>}}),
-    {ok, _, _} = rep(2).
+    rep(3),
+    manager:change_pool(spec(), {'+', [nd("rst"), nd("uvw"), nd("xyz")]}),
+    manager:obtain({spec(), {name, simple_agent, <<"jared">>}}),
+    manager:obtain({spec(), {name, simple_agent, <<"jeff">>}}),
+    manager:obtain({spec(), {name, simple_agent, <<"thomas">>}}),
+    rep(2).
 
 b2() ->
-    {ok, _, _} = manager:obtain({spec(), {name, simple_agent, <<"jared">>}}),
-    {ok, _, _} = manager:change_pool(spec(), {'+', [nd("rst")]}),
-    {ok, _, _} = rep(1).
+    manager:obtain({spec(), {name, simple_agent, <<"jared">>}}),
+    manager:change_pool(spec(), {'+', [nd("rst")]}),
+    rep(1).
 
 c() ->
-    {ok, _, _} = manager:alias(spec(), simple_agent, <<"jared">>, <<"account">>),
-    {ok, _, _} = manager:alias(spec(), simple_agent, <<"jeff">>, <<"account">>).
+    manager:alias(spec(), simple_agent, <<"jared">>, <<"account">>),
+    manager:alias(spec(), simple_agent, <<"jeff">>, <<"account">>).
 
 d() ->
-    {ok, _, _} = manager:unalias(spec(), simple_agent, <<"jared">>, <<"account">>),
-    {ok, _, _} = manager:unalias(spec(), simple_agent, <<"jeff">>, <<"account">>).
+    manager:unalias(spec(), simple_agent, <<"jared">>, <<"account">>),
+    manager:unalias(spec(), simple_agent, <<"jeff">>, <<"account">>).
 
 e() ->
     a(), b(), c(), d().
@@ -46,7 +46,7 @@ f(A, B, C) ->
     manager:inform_pool(spec(), #{nd("rst") => A, nd("uvw") => B, nd("xyz") => C}).
 
 v() ->
-    {ok, _, _} = manager:vacate({spec(), {name, simple_agent, <<"thomas">>}}).
+    manager:vacate({spec(), {name, simple_agent, <<"thomas">>}}).
 
 nd(Name) ->
     util:atom(Name ++ "@" ++ util:ok(inet:gethostname())).
@@ -58,8 +58,7 @@ ag(AgentId) ->
     simple_agent:spec(spec(), AgentId).
 
 ags(AgentId) ->
-    {ok, State, _} = loom:patch(ag(AgentId), get_state),
-    State.
+    loom:patch(ag(AgentId), get_state).
 
 nms(AgentId) ->
     util:get(ags(AgentId), names).
@@ -74,8 +73,7 @@ patch(Message) ->
     loom:patch(spec(), Message).
 
 state() ->
-    {ok, State, _} = patch(get_state),
-    State.
+    patch(get_state).
 
 subs() ->
     State = state(),

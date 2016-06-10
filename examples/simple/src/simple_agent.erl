@@ -20,7 +20,7 @@ connect(Name, Ctx) ->
     agent:connect({simple_agency:spec(), {name, ?MODULE, Name}}, Name, Ctx).
 
 patch(Name, Message) ->
-    patch(Name, Message, #{}).
+    loom:ok(patch(Name, Message, #{})).
 
 patch(Name, Message, Ctx) ->
     loom:patch({simple_agency:spec(), {name, ?MODULE, Name}}, Message, Ctx).

@@ -151,151 +151,151 @@ id(#manager{id=Id}) ->
     Id.
 
 lookup(Which) ->
-    lookup(Which, #{}).
+    loom:ok(lookup(Which, #{})).
 
 lookup({Manager, Subish}, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            verb => lookup,
-            what => Subish
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 verb => lookup,
+                 what => Subish
+                }, Ctx).
 
 obtain(Which) ->
-    obtain(Which, #{}).
+    loom:ok(obtain(Which, #{})).
 
 obtain({Manager, Subish}, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            verb => obtain,
-            what => Subish
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 verb => obtain,
+                 what => Subish
+                }, Ctx).
 
 vacate(Which) ->
-    vacate(Which, #{}).
+    loom:ok(vacate(Which, #{})).
 
 vacate({Manager, Subish}, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            verb => vacate,
-            what => Subish
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 verb => vacate,
+                 what => Subish
+                }, Ctx).
 
 ids(Which) ->
-    ids(Which, #{}).
+    loom:ok(ids(Which, #{})).
 
 ids({Manager, {name, SubType, SubName}}, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            kind => chain,
-            verb => lookup,
-            path => [sub, names, SubType, SubName]
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 kind => chain,
+                 verb => lookup,
+                 path => [sub, names, SubType, SubName]
+                }, Ctx).
 
 sites(Which) ->
-    sites(Which, #{}).
+    loom:ok(sites(Which, #{})).
 
 sites({Manager, {id, SubType, SubId}}, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            kind => chain,
-            verb => lookup,
-            path => [sub, sites, SubType, SubId]
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 kind => chain,
+                 verb => lookup,
+                 path => [sub, sites, SubType, SubId]
+                }, Ctx).
 
 alias(Manager, SubType, SubName, SubId) ->
-    alias(Manager, SubType, SubName, SubId, #{}).
+    loom:ok(alias(Manager, SubType, SubName, SubId, #{})).
 
 alias(Manager, SubType, SubName, SubId, Ctx) when is_binary(SubName), is_binary(SubId) ->
-    patch(Manager, #{
-            type => tether,
-            verb => accrue,
-            path => [sub, names, SubType, SubName],
-            value =>
-                case util:get(Ctx, weak) of
-                    true ->
-                        {init, SubId};
-                    _ ->
-                        {push, SubId}
-                end
-           }, Ctx).
+    loom:patch(Manager, #{
+                type => tether,
+                verb => accrue,
+                path => [sub, names, SubType, SubName],
+                value =>
+                    case util:get(Ctx, weak) of
+                        true ->
+                            {init, SubId};
+                        _ ->
+                            {push, SubId}
+                    end
+               }, Ctx).
 
 unalias(Manager, SubType, SubName, SubId) ->
-    unalias(Manager, SubType, SubName, SubId, #{}).
+    loom:ok(unalias(Manager, SubType, SubName, SubId, #{})).
 
 unalias(Manager, SubType, SubName, SubId, Ctx) when is_binary(SubName), is_binary(SubId) ->
-    patch(Manager, #{
-            type => tether,
-            verb => accrue,
-            path => [sub, names, SubType, SubName],
-            value => {drop, SubId}
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => tether,
+                 verb => accrue,
+                 path => [sub, names, SubType, SubName],
+                 value => {drop, SubId}
+                }, Ctx).
 
 %% admin
 
 lookup_pool(Manager) ->
-    lookup_pool(Manager, #{}).
+    loom:ok(lookup_pool(Manager, #{})).
 
 lookup_pool(Manager, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            kind => chain,
-            verb => lookup,
-            path => [pool]
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 kind => chain,
+                 verb => lookup,
+                 path => [pool]
+                }, Ctx).
 
 change_pool(Manager, Change) ->
-    change_pool(Manager, Change, #{}).
+    loom:ok(change_pool(Manager, Change, #{})).
 
 change_pool(Manager, Change, Ctx) ->
-    patch(Manager, #{
-            type => tether,
-            verb => accrue,
-            path => [pool],
-            value => Change
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => tether,
+                 verb => accrue,
+                 path => [pool],
+                 value => Change
+                }, Ctx).
 
 inform_pool(Manager, Info) ->
-    inform_pool(Manager, Info, #{}).
+    loom:ok(inform_pool(Manager, Info, #{})).
 
 inform_pool(Manager, Info, Ctx) ->
-    patch(Manager, #{
-            type => measurement,
-            kind => pool,
-            value => Info
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => measurement,
+                 kind => pool,
+                 value => Info
+                }, Ctx).
 
 report_pool(Manager) ->
-    report_pool(Manager, #{}).
+    loom:ok(report_pool(Manager, #{})).
 
 report_pool(Manager, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            verb => lookup,
-            path => [pool_info]
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 verb => lookup,
+                 path => [pool_info]
+                }, Ctx).
 
 get_replication_factor(Manager, SubType) ->
-    get_replication_factor(Manager, SubType, #{}).
+    loom:ok(get_replication_factor(Manager, SubType, #{})).
 
 get_replication_factor(Manager, SubType, Ctx) ->
-    patch(Manager, #{
-            type => command,
-            kind => chain,
-            verb => lookup,
-            path => [replication, SubType]
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => command,
+                 kind => chain,
+                 verb => lookup,
+                 path => [replication, SubType]
+                }, Ctx).
 
 set_replication_factor(Manager, SubType, K) ->
-    set_replication_factor(Manager, SubType, K, #{}).
+    loom:ok(set_replication_factor(Manager, SubType, K, #{})).
 
 set_replication_factor(Manager, SubType, K, Ctx) ->
-    patch(Manager, #{
-            type => tether,
-            kind => chain,
-            verb => accrue,
-            path => [replication, SubType],
-            value => {'=', K}
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => tether,
+                 kind => chain,
+                 verb => accrue,
+                 path => [replication, SubType],
+                 value => {'=', K}
+                }, Ctx).
 
 %% 'find_*' helps subordinates to implement their 'find' callbacks
 
@@ -349,14 +349,14 @@ find_sub(Which, get_if_exists, Ctx) ->
 %% the manager may accept the request and honor it later, or not at all
 
 request_relocate(Manager, AwayFrom) ->
-    request_relocate(Manager, AwayFrom, #{}).
+    loom:ok(request_relocate(Manager, AwayFrom, #{})).
 
 request_relocate(Manager, AwayFrom, Ctx) ->
-    patch(Manager, #{
-            type => request,
-            kind => relocate,
-            value => AwayFrom
-           }, Ctx).
+    loom:patch(Manager, #{
+                 type => request,
+                 kind => relocate,
+                 value => AwayFrom
+                }, Ctx).
 
 %% 'request_resources' is for subordinate managers to request a bigger pool
 %% in theory this same channel could be used to request that resources be revoked
@@ -365,20 +365,15 @@ request_relocate(Manager, AwayFrom, Ctx) ->
 %% having more resources is a nice-to-have rather than a strict requirement
 
 request_resources(Manager, Path, HaveWant) ->
-    request_resources(Manager, Path, HaveWant, #{}).
+    loom:ok(request_resources(Manager, Path, HaveWant, #{})).
 
 request_resources(Manager, Path, HaveWant, Ctx) ->
-    patch(Manager, #{
-            type => request,
-            kind => resources,
-            path => Path,
-            value => HaveWant
-           }, Ctx).
-
-%% 'patch' dispatches a message to a manager (but unwraps value by default)
-
-patch(Manager, Message, Ctx) ->
-    loom:patch(Manager, Message, Ctx).
+    loom:patch(Manager, #{
+                 type => request,
+                 kind => resources,
+                 path => Path,
+                 value => HaveWant
+                }, Ctx).
 
 %% manage subordinate
 
@@ -1003,7 +998,7 @@ do_control_sites({Sub, {[], [_|_] = New}}, State) ->
     %% the start message will keep trying to seed until it succeeds
     %% since the root conf is symbolic, we can safely try seeding different nodes when we don't get a reply
     SubSpec = subordinate_spec(State, Sub),
-    case loom:deliver(New, SubSpec, #{type => start, seed => New}) of
+    case loom:deliver(New, SubSpec, #{type => start, seed => New}, #{}) of
         {error, delivery, #{dstat := #{spec := SubSpec}}} ->
             {retry, {10, seconds}, {undeliverable, {seed, SubSpec}}};
         {ok, already_exists, _} ->
@@ -1016,7 +1011,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
     %% once the motion passes it will take effect, eventually
     %% we rely on the old nodes to make the transition
     SubSpec = subordinate_spec(State, Sub),
-    case loom:deliver(Old, SubSpec, #{type => command, verb => lookup, path => [elect]}) of
+    case loom:deliver(Old, SubSpec, #{type => command, verb => lookup, path => [elect]}, #{}) of
         {error, delivery, _} ->
             {retry, {10, seconds}, {undeliverable, {start, SubSpec}}};
         {ok, {ok, {_, Elect = #{current := Current}}}, #{dstat := #{node := Probed}}} ->
@@ -1030,7 +1025,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
                     {retry, {10, seconds}, {wait, {Probed, control, pending}}};
                 {_, #{}, _} ->
                     %% has another value, we ought to set it
-                    case loom:deliver(Old, SubSpec, #{type => move, kind => conf, value => {'=', New}}) of
+                    case loom:deliver(Old, SubSpec, #{type => move, kind => conf, value => {'=', New}}, #{}) of
                         {ok, {ok, _}, _} ->
                             {done, {ok, {true, {SubSpec, New}}}};
                         {ok, {retry, stopped}, _} ->
@@ -1075,7 +1070,7 @@ do_assign_pool({Sub, {Old, New}}, State) ->
       verb => lookup,
       path => [pool]
      },
-    case loom:deliver(Sites, SubSpec, Probe) of
+    case loom:deliver(Sites, SubSpec, Probe, #{}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
             {retry, {10, seconds}, {unreachable, {probe, SubSpec}, Reason}};
@@ -1133,7 +1128,7 @@ do_micromanage(Manager, Subish, Mechanism, Path, Value) ->
     do_micromanage(Manager, Subish, Mechanism, Path, Value, undefined).
 
 do_micromanage(#{spec := Spec}, {id, SubType, SubId}, obtain, Path, Value, Return) ->
-    case obtain({Spec, {id, SubType, SubId}}) of
+    case obtain({Spec, {id, SubType, SubId}}, #{}) of
         {ok, {_, {SubSpec, Sites}}, _} ->
             do_micromanage(Spec, SubSpec, Sites, Path, Value, Return);
         {error, Reason, _} ->
@@ -1141,7 +1136,7 @@ do_micromanage(#{spec := Spec}, {id, SubType, SubId}, obtain, Path, Value, Retur
             {retry, {10, seconds}, {unreachable, {obtain, Spec}, Reason}}
     end;
 do_micromanage(#{spec := Spec}, {id, SubType, SubId}, lookup, Path, Value, Return) ->
-    case lookup({Spec, {id, SubType, SubId}}) of
+    case lookup({Spec, {id, SubType, SubId}}, #{}) of
         {ok, {false, undefined}, _} ->
             {done, Return};
         {ok, {_, {SubSpec, SubSites}}, _} ->
@@ -1161,7 +1156,7 @@ do_micromanage(_, SubSpec, Sites, Path, Value, Return) ->
       verb => lookup,
       path => Path
      },
-    case loom:deliver(Sites, SubSpec, Probe) of
+    case loom:deliver(Sites, SubSpec, Probe, #{}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
             {retry, {10, seconds}, {unreachable, {probe, SubSpec}, Reason}};
@@ -1196,7 +1191,7 @@ do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
     %%  3. Free: stop the sub, it should in turn free all its resources when stopped
     %%      XXX: currently managers don't free their resources when stopped, they should
     SubSpec = subordinate_spec(State, Sub),
-    case loom:deliver(Sites, SubSpec, #{type => command, verb => lookup, path => [names]}) of
+    case loom:deliver(Sites, SubSpec, #{type => command, verb => lookup, path => [names]}, #{}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
             {retry, {10, seconds}, {unreachable, {names, Sub}, Reason}};

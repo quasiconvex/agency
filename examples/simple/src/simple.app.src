@@ -1,4 +1,0 @@
-%% -*- erlang -*-
-{application, simple,
- [{vsn, []},
-  {applications, [kernel, stdlib]}]}.

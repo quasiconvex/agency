@@ -79,7 +79,7 @@ which(Spec = #agent{mod=AgentMod, id=AgentId}) ->
     {agency(Spec), {id, AgentMod, AgentId}}.
 
 connect(Specish, As) ->
-    connect(Specish, As, #{}).
+    loom:ok(connect(Specish, As, #{})).
 
 connect(Specish, As, Ctx) ->
     %% if the name actually maps to a different id than we thought (cached), its ok
@@ -95,9 +95,6 @@ connect(Specish, As, Ctx) ->
                        as => As,
                        at => time:unix()
                      }, util:select(Ctx, [since, token])),
-    patch(Specish, Message, Ctx).
-
-patch(Specish, Message, Ctx) ->
     loom:patch(Specish, Message, Ctx).
 
 client_filter(#{mute := true}, _, _) ->
