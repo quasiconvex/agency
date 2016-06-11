@@ -130,9 +130,15 @@
          callback/4]).
 
 %% manager impl helpers
--export([iter_subordinates/2,
+-export([sub_spec/2,
+         sub_is_manager/2,
+         list_subs/1,
+         list_subs/2,
+         list_sub_ids/1,
+         list_sub_ids/2,
          list_sub_names/1,
-         list_sub_names/2]).
+         list_sub_names/2,
+         list_sub_types/2]).
 
 %% client
 
@@ -375,28 +381,75 @@ request_resources(Manager, Path, HaveWant, Ctx) ->
                  value => HaveWant
                 }, Ctx).
 
-%% manage subordinate
+%% manage subordinates
 
-subordinate_spec(#{spec := Manager}, Sub) ->
-    subordinate_spec(Manager, Sub);
-subordinate_spec(Manager, [SubType, SubId]) ->
+sub_spec(#{spec := Manager}, Sub) ->
+    sub_spec(Manager, Sub);
+sub_spec(Manager, [SubType, SubId]) ->
     SubType:spec(Manager, SubId).
 
-subordinate_is_manager(Manager, Sub) ->
-    case subordinate_spec(Manager, Sub) of
+sub_is_manager(Manager, Sub) ->
+    case sub_spec(Manager, Sub) of
         #manager{} ->
             true;
         _ ->
             false
     end.
 
-make_subordinate_id(_SubType, SubName) when is_binary(SubName) ->
+make_sub_id(_SubType, SubName) when is_binary(SubName) ->
     util:bin([base64url:encode(SubName), "-", time:stamp(time:unow(), tai64)]).
 
 which_callback({Manager = #manager{}, {name, SubType, _}}) ->
     SubType:spec(Manager, undefined);
 which_callback({Manager = #manager{}, {id, SubType, SubId}}) ->
     SubType:spec(Manager, SubId).
+
+list_subs(State) ->
+    list_subs(all, State).
+
+list_subs(Which, #{spec := Manager} = State) ->
+    [T:spec(Manager, I) || {id, T, I} <- list_sub_ids(Which, State)].
+
+list_sub_ids(State) ->
+    list_sub_ids(all, State).
+
+list_sub_ids(all, State) ->
+    list_sub_ids(list_sub_types(sites, State), State);
+list_sub_ids(SubTypes, State) ->
+    %% XXX: would be nice to push the fold to db
+    %%      if only NIFs supported calling erlang functions
+    util:fold(
+      fun (SubType, Acc) ->
+              util:fold(
+                fun ({SubId, _SubSites}, A) ->
+                        [{id, SubType, SubId}|A]
+                end, Acc, util:lookup(State, [sub, sites, SubType], []))
+      end, [], SubTypes).
+
+list_sub_names(State) ->
+    list_sub_names(all, State).
+
+list_sub_names(all, State) ->
+    list_sub_names(list_sub_types(names, State), State);
+list_sub_names(SubTypes, State) ->
+    %% XXX: see above
+    %% NB: return names with at least one id (even if chain is locked)
+    util:fold(
+      fun (SubType, Acc) ->
+              util:fold(
+                fun ({SubName, {[_|_], _}}, A) ->
+                        [{name, SubType, SubName}|A];
+                    ({SubName, {[_|_], _, _}}, A) ->
+                        [{name, SubType, SubName}|A];
+                    ({_, _}, A) ->
+                        A
+                end, Acc, util:lookup(State, [sub, names, SubType], []))
+      end, [], SubTypes).
+
+list_sub_types(K, State) when K =:= sites; K =:= names ->
+    util:fold(fun ({SubTypeBin, _}, Acc) ->
+                      [util:atom(SubTypeBin)|Acc]
+              end, [], util:lookup(State, [sub, K], [])).
 
 %% loom
 
@@ -486,7 +539,7 @@ command_called(#{verb := accrue, path := [pool]}, Node, true, State) ->
 command_called(#{verb := accrue, path := [replication, SubType]}, Node, true, State) ->
     %% make sure all affected subordinates are updated to reflect the change
     %% we only need to check if the sites are affected, make sure we have the right number
-    Task = {fun ?MODULE:do_adjust_subs/2, {{type, SubType}, replication}},
+    Task = {fun ?MODULE:do_adjust_subs/2, {[SubType], replication}},
     loom:suture_task(adjust, Node, Task, State);
 
 command_called(#{verb := lookup, what := {name, SubType, SubName}}, _, _, State)
@@ -504,7 +557,7 @@ command_called(#{verb := obtain, what := {name, SubType, SubName}}, _, _, State)
         A when A =:= undefined; A =:= [] ->
             %% information will be propagated through the chain motion itself
             %% we dont need yet another emit, unless we want to choose the value later
-            SubId = make_subordinate_id(SubType, SubName),
+            SubId = make_sub_id(SubType, SubName),
             Message = #{verb => accrue, path => [sub, names, SubType, SubName], value => {init, SubId}},
             loom:wait(loom:make_tether(Message, State));
         [SubId|_] ->
@@ -577,7 +630,7 @@ command_called(#{verb := create, path := [sub, sites|Sub]}, Node, true, State) w
     Boiler = #{type => command, kind => chain, verb => accrue, value => {'=', Nodes}},
     State1 = loom:suture_yarn(Boiler#{path => [sub, sites|Sub]}, State),
     State2 =
-        case subordinate_is_manager(State1, Sub) of
+        case sub_is_manager(State1, Sub) of
             true ->
                 %% if its a manager, also choose an initial pool
                 %% NB: for now this is always the same as sites, but could be independent
@@ -790,7 +843,7 @@ respond_spec_sites(SubType, SubId, State) ->
 respond_spec_sites(_, _, undefined, State) ->
     State#{response => {ok, {false, undefined}}};
 respond_spec_sites(SubType, SubId, Sites, State) ->
-    SubSpec = subordinate_spec(State, [SubType, SubId]),
+    SubSpec = sub_spec(State, [SubType, SubId]),
     State#{response => {ok, {false, {SubSpec, Sites}}}}.
 
 %% manage resources
@@ -801,46 +854,6 @@ diff_op({[], Rem}) ->
     {'-', Rem};
 diff_op({Add, Rem}) ->
     [{'+', Add}, {'-', Rem}].
-
-iter_subordinates(all, State) ->
-    %% XXX: would be nice to push the fold to db
-    %%      if only NIFs supported calling erlang functions
-    util:fold(
-      fun ({SubType, BySubId}, Acc) ->
-              util:fold(
-                fun ({SubId, _}, A) ->
-                        [{util:atom(SubType), SubId}|A]
-                end, Acc, BySubId)
-      end, [], util:lookup(State, [sub, sites], []));
-iter_subordinates({type, SubType}, State) ->
-    %% XXX: see above
-    util:fold(
-      fun ({SubId, _}, Acc) ->
-              [{SubType, SubId}|Acc]
-      end, [], util:lookup(State, [sub, sites, SubType], [])).
-
-list_sub_names(State) ->
-    list_sub_names(fun (_) -> true end, State).
-
-list_sub_names(FilterType, State) ->
-    %% XXX: see above
-    util:fold(
-      fun ({SubTypeBin, BySubName}, Acc) ->
-              SubType = util:atom(SubTypeBin),
-              case FilterType(SubType) of
-                  true ->
-                      util:fold(
-                        fun ({SubName, {[_|_], _}}, A) ->
-                                [{SubType, SubName}|A];
-                            ({SubName, {[_|_], _, _}}, A) ->
-                                [{SubType, SubName}|A];
-                            ({_, _}, A) ->
-                                A
-                        end, Acc, BySubName);
-                  false ->
-                      Acc
-              end
-      end, [], util:lookup(State, [sub, names], [])).
 
 ranked_nodes(PoolInfo) ->
     util:vals(lists:keysort(1, util:index(PoolInfo))).
@@ -956,7 +969,7 @@ do_adjust_subs({Which, Trigger}, State) ->
     %% make sure that each subordinate has sensible allocations when params change
     %% this task should be globally queued, so that only one works at a time
     BMax = util:lookup(State, [opts, alloc_batch_limit]),
-    Iter = iter_subordinates(Which, State),
+    Iter = list_sub_ids(Which, State),
     do_adjust_subs(initial, Which, Trigger, Iter, BMax, State);
 do_adjust_subs({Which, Trigger, Iter, BMax}, State) ->
     do_adjust_subs(retry, Which, Trigger, Iter, BMax, State).
@@ -974,7 +987,7 @@ do_adjust_subs(Phase, Which, Trigger, Iter, BMax, State) ->
                   %% initial attempt, actually figure out what we wan't to allocate
                   {Allocs, S1} =
                       util:fold(
-                        fun ({SubType, SubId}, A) ->
+                        fun ({id, SubType, SubId}, A) ->
                                 A1 = maybe_realloc(Trigger, [sub, sites, SubType, SubId], A),
                                 __ = maybe_realloc(Trigger, [sub, pools, SubType, SubId], A1)
                         end, {[], S}, Chunk),
@@ -997,7 +1010,7 @@ do_control_sites({Sub, {[], [_|_] = New}}, State) ->
     %% we can stop as soon as the loom acknowledges the message
     %% the start message will keep trying to seed until it succeeds
     %% since the root conf is symbolic, we can safely try seeding different nodes when we don't get a reply
-    SubSpec = subordinate_spec(State, Sub),
+    SubSpec = sub_spec(State, Sub),
     case loom:deliver(New, SubSpec, #{type => start, seed => New}, #{}) of
         {error, delivery, #{dstat := #{spec := SubSpec}}} ->
             {retry, {10, seconds}, {undeliverable, {seed, SubSpec}}};
@@ -1010,7 +1023,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
     %% we can stop as soon as the loom accepts responsibility for the change
     %% once the motion passes it will take effect, eventually
     %% we rely on the old nodes to make the transition
-    SubSpec = subordinate_spec(State, Sub),
+    SubSpec = sub_spec(State, Sub),
     case loom:deliver(Old, SubSpec, #{type => command, verb => lookup, path => [elect]}, #{}) of
         {error, delivery, _} ->
             {retry, {10, seconds}, {undeliverable, {start, SubSpec}}};
@@ -1051,7 +1064,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
 do_control_sites({Sub, _}, State) ->
     %% there are no old nodes and no new ones: weird, but someone must have asked us to do it
     %% controlling them is easy: nothing to do
-    SubSpec = subordinate_spec(State, Sub),
+    SubSpec = sub_spec(State, Sub),
     {done, {ok, {false, {SubSpec, []}}}}.
 
 %% pool management (of subordinates)
@@ -1062,7 +1075,7 @@ do_assign_pool({_, {Same, Same}}, _State) ->
 do_assign_pool({Sub, {Old, New}}, State) ->
     %% probe the path first to prevent duplicating requests
     %% then wait, modify, or retry as needed
-    SubSpec = subordinate_spec(State, Sub),
+    SubSpec = sub_spec(State, Sub),
     Sites = erloom_chain:value(State, [sub, sites|Sub], []),
     Probe = #{
       type => command,
@@ -1190,7 +1203,7 @@ do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
     %%  2. Drop aliases: remove all names which are associated with the sub, even old ones
     %%  3. Free: stop the sub, it should in turn free all its resources when stopped
     %%      XXX: currently managers don't free their resources when stopped, they should
-    SubSpec = subordinate_spec(State, Sub),
+    SubSpec = sub_spec(State, Sub),
     case loom:deliver(Sites, SubSpec, #{type => command, verb => lookup, path => [names]}, #{}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
