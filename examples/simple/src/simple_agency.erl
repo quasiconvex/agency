@@ -77,8 +77,8 @@ state() ->
 
 subs() ->
     State = state(),
-    SubNames = util:get(State, sub_names),
-    SubSites = util:get(State, sub_sites),
+    SubNames = util:lookup(State, [sub, names]),
+    SubSites = util:lookup(State, [sub, sites]),
     util:fold(
       fun ({SubType, BySubName}, Acc) ->
               util:fold(

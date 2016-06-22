@@ -6,7 +6,6 @@
 
 -type state() :: #{ %% + loom:state()
              roles => [atom()],
-             tokens => #{},
              clients => #{}
             }.
 
@@ -31,12 +30,6 @@
          which/1,
          connect/2,
          connect/3]).
-
-%% agent mod helpers
--export([is_valid_token/2,
-         create_token/3,
-         forget_token/2,
-         purge_tokens/1]).
 
 %% loom
 -behavior(loom).
@@ -125,22 +118,18 @@ opts(Spec) ->
     maps:merge(Defaults, callback(Spec, {opts, 1}, [Spec], #{})).
 
 keep(State) ->
-    Builtins = maps:with([roles, tokens], State),
+    Builtins = maps:with([roles], State),
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
 init(State) ->
-    State1 = State#{
-               roles => util:get(State, roles, []),
-               tokens => util:get(State, tokens, #{})
-              },
+    State1 = State#{roles => util:get(State, roles, [])},
     callback(State1, {init, 1}, [State1], State1).
 
 waken(State) ->
-    State1 = purge_tokens(State),
-    callback(State1, {waken, 1}, [State1], State1).
+    callback(State, {waken, 1}, [State], State).
 
 verify_message(Message = #{type := conn, token := Token}, State) ->
-    case is_valid_token(State, Token) of
+    case loom:is_valid_token(State, Token) of
         true ->
             callback(State, {verify_message, 2}, [Message, State], {ok, Message, State});
         false ->
@@ -229,39 +218,6 @@ callback(#{spec := Spec}, FA, Args, Default) ->
     callback(Spec, FA, Args, Default);
 callback(#agent{mod=Mod}, FA, Args, Default) ->
     loom:callback(Mod, FA, Args, Default).
-
-%% token management
-%%
-%% tokens are just secrets kept by the agent and associated with a value
-%% tokens can expire, and they can be used to ensure a client is allowed to connect
-%% agent modules may use tokens for shared secrets in other types of messages
-
-is_valid_token(State, Token) ->
-    Now = time:unix(),
-    case util:lookup(State, [tokens, Token]) of
-        undefined ->
-            false;
-        #{expiration := Exp} when Exp < Now ->
-            false;
-        #{} ->
-            true
-    end.
-
-create_token(State, Token, Value = #{}) ->
-    util:modify(State, [tokens, Token], Value).
-
-forget_token(State, Token) ->
-    util:remove(State, [tokens, Token]).
-
-purge_tokens(State = #{tokens := Tokens}) ->
-    Now = time:unix(),
-    Tokens1 =
-        util:fold(fun ({_, #{expiration := Exp}}, Acc) when Exp < Now ->
-                          Acc;
-                      ({T, V}, Acc) ->
-                          util:set(Acc, T, V)
-                  end, #{}, Tokens),
-    State#{tokens => Tokens1}.
 
 %% client helpers
 
