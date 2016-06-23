@@ -1,9 +1,6 @@
 -module(simple_agency).
+-compile(export_all).
 -include_lib("agency/include/agency.hrl").
-
--export([a/0, b/0, b2/0, c/0, d/0, e/0, f/0, f/3, v/0]).
--export([nd/1, fwd/2, ag/1, ags/1, nms/1, rep/1]).
--export([spec/0, patch/1, state/0, subs/0, tasks/0]).
 
 -behavior(manager).
 -export([find/2,

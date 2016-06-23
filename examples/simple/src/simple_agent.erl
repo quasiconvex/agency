@@ -14,7 +14,7 @@
          handle_message/4]).
 
 connect(Name) ->
-    connect(Name, #{}).
+    loom:ok(connect(Name, #{})).
 
 connect(Name, Ctx) ->
     agent:connect({simple_agency:spec(), {name, ?MODULE, Name}}, Name, Ctx).

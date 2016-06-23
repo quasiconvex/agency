@@ -226,14 +226,14 @@ catchup_client(Client, Name, Since, State = #{point := Point}) ->
     %%     and wait for ack (or timeout and disconnect) on each chunk
     Missing =
         erloom_logs:fold(
-          fun (Message, Locus, Acc) ->
+          fun ({Locus, Message}, Acc) ->
                   case client_filter(Message, Name, State) of
                       undefined ->
                           Acc;
                       Msg ->
-                          [{Msg, Locus}|Acc]
+                          [{Locus, Msg}|Acc]
                   end
-          end, [], {Since, Point}, State),
+          end, [], State#{range => {Since, Point}}),
     Client ! {catchup, lists:reverse(Missing)},
     State.
 
@@ -244,7 +244,7 @@ forward_clients(Message, State = #{locus := Locus}) ->
                   undefined ->
                       S;
                   Msg ->
-                      Client ! {forward, [{Msg, Locus}]},
+                      Client ! {forward, [{Locus, Msg}]},
                       S
               end
       end, State, util:get(State, clients, #{})).
