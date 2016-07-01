@@ -57,6 +57,8 @@
 
 %% agent
 
+agency(#{spec := Spec}) ->
+    agency(Spec);
 agency(#agent{agency=Agency}) ->
     Agency.
 
@@ -64,6 +66,11 @@ id(#{spec := Spec}) ->
     id(Spec);
 id(#agent{id=AgentId}) ->
     AgentId.
+
+mod(#{spec := Spec}) ->
+    mod(Spec);
+mod(#agent{mod=AgentMod}) ->
+    AgentMod.
 
 which(Specish = {#manager{}, _}) ->
     Specish;
@@ -87,7 +94,7 @@ connect(Specish, As, Ctx) ->
                        from => self(),
                        as => As,
                        at => time:unix()
-                     }, util:select(Ctx, [since, token])),
+                     }, util:select(Ctx, [since, token, sudo])),
     loom:patch(Specish, Message, Ctx).
 
 client_filter(#{mute := true}, _, _) ->
@@ -108,7 +115,7 @@ vsn(Spec) ->
     maps:merge(callback(Spec, {vsn, 1}, [Spec], #{}), #{}).
 
 find(Specish, Ctx) ->
-    manager:find_cache(which(Specish), get_or_create, [agent], Ctx).
+    manager:find_cache(which(Specish), get_or_create, Ctx).
 
 home(Spec) ->
     callback(Spec, {home, 1}, [Spec]).
@@ -168,6 +175,11 @@ handle_info(Info = {'EXIT', From, _}, State) ->
 handle_info(Info, State) ->
     callback(State, {handle_info, 2}, [Info, State], State).
 
+handle_builtin(#{type := conn, sudo := true, as := Name} = Message, _, true, State) ->
+    State#{response => #{
+             which => {agency(State), {name, mod(State), Name}},
+             message => util:except(Message#{via => id(State)}, [sudo, token])
+            }};
 handle_builtin(#{type := conn, from := From, as := Name} = Message, _, true, State) ->
     case erloom_chain:value(State, [names, Name]) of
         true ->
@@ -177,7 +189,7 @@ handle_builtin(#{type := conn, from := From, as := Name} = Message, _, true, Sta
             catchup_client(From, Name, util:get(Message, since), State2);
         _ ->
             %% we refuse conns for names we dont manage
-            State#{response => {error, {name, Name}}}
+            State#{response => #{error => {name, Name}}}
     end;
 
 handle_builtin(_Message, _Node, _IsNew, State) ->
@@ -188,9 +200,10 @@ handle_message(Message, Node, IsNew, State) ->
     State2 = forward_clients(Message, State1),
     callback(State2, {handle_message, 4}, [Message, Node, IsNew, State2], State2).
 
-command_called(#{verb := modify, path := [names, Name], value := false}, _, true, State) ->
+command_called(#{verb := modify, path := [names, Name], value := false} = Command, Node, true, State) ->
     %% close conns when we stop managing a name
-    close_clients(Name, State);
+    State1 = close_clients(Name, State),
+    callback(State1, {command_called, 4}, [Command, Node, true, State1], State1);
 command_called(Command, Node, DidChange, State) ->
     callback(State, {command_called, 4}, [Command, Node, DidChange, State], State).
 
@@ -235,6 +248,7 @@ catchup_client(Client, Name, Since, State = #{point := Point}) ->
                   end
           end, [], State#{range => {Since, Point}}),
     Client ! {catchup, lists:reverse(Missing)},
+    Client ! {caught, Point},
     State.
 
 forward_clients(Message, State = #{locus := Locus}) ->

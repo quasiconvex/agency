@@ -89,7 +89,8 @@
          set_replication_factor/4]).
 
 %% admin / subordinate
--export([find_cache/4,
+-export([find_cache/3,
+         find_cache/4,
          find_cache/6,
          find_sub/3,
          request_relocate/2,
@@ -304,6 +305,9 @@ set_replication_factor(Manager, SubType, K, Ctx) ->
                 }, Ctx).
 
 %% 'find_*' helps subordinates to implement their 'find' callbacks
+
+find_cache(Which, Semantics, Ctx) ->
+    find_cache(Which, Semantics, [cache, Which], Ctx).
 
 find_cache(Which, Semantics, CachePath, Ctx) ->
     Check = fun (C, _) -> util:lookup(C, CachePath) end,
