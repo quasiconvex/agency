@@ -29,6 +29,7 @@
 %%     maybe caused by moving across non-overlapping set of nodes (hypothesis, not tested)
 %%  - realloc semantics are wrong (see do_adjust_subs)
 %%  - vacating subs is not completely safe (see do_remove_sub)
+%%  - using db state for control is problematic (see do_transfer_name)
 
 %% behavior
 -export_type([sub_type/0,
@@ -492,7 +493,8 @@ init(State) ->
                utilization => util:get(State, utilization, #{}),
                sub => jfdb:open(loom:path(sub, State))
               },
-    callback(State1, {init, 1}, [State1], State1).
+    State2 = cache_pool_info(State1),
+    callback(State1, {init, 1}, [State2], State2).
 
 waken(State) ->
     callback(State, {waken, 1}, [State], State).
@@ -1002,7 +1004,7 @@ do_adjust_subs(Phase, Which, Trigger, Iter, BMax, State) ->
           end, {[], State}, Iter, BMax),
     case Retry of
         [_|_] ->
-            {retry, {Which, Trigger, Iter, BMax}, {10, seconds}, unfinished};
+            {retry, {Which, Trigger, Iter, BMax}, {30, seconds}, unfinished};
         [] ->
             {done, ok}
     end.
@@ -1017,7 +1019,7 @@ do_control_sites({Sub, {[], [_|_] = New}}, State) ->
     SubSpec = sub_spec(State, Sub),
     case loom:deliver(New, SubSpec, #{type => start, seed => New}, #{}) of
         {error, delivery, #{dstat := #{spec := SubSpec}}} ->
-            {retry, {10, seconds}, {undeliverable, {seed, SubSpec}}};
+            {retry, {30, seconds}, {undeliverable, {seed, SubSpec}}};
         {ok, already_exists, _} ->
             {done, {ok, {false, {SubSpec, New}}}};
         {ok, ok, _} ->
@@ -1030,7 +1032,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
     SubSpec = sub_spec(State, Sub),
     case loom:deliver(Old, SubSpec, #{type => command, verb => lookup, path => [elect]}, #{}) of
         {error, delivery, _} ->
-            {retry, {10, seconds}, {undeliverable, {start, SubSpec}}};
+            {retry, {30, seconds}, {undeliverable, {start, SubSpec}}};
         {ok, {ok, {_, Elect = #{current := Current}}}, #{dstat := #{node := Probed}}} ->
             %% check if the current conf is what we want already
             case util:get(Elect, Current) of
@@ -1039,7 +1041,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
                     {done, {ok, {false, {SubSpec, New}}}};
                 {_, #{value := {'=', New}}, _} ->
                     %% wait to see if it passes
-                    {retry, {10, seconds}, {wait, {Probed, control, pending}}};
+                    {retry, {30, seconds}, {wait, {Probed, control, pending}}};
                 {_, #{}, _} ->
                     %% has another value, we ought to set it
                     case loom:deliver(Old, SubSpec, #{type => move, kind => conf, value => {'=', New}}, #{}) of
@@ -1051,7 +1053,7 @@ do_control_sites({Sub, {[_|_] = Old, New}}, State) ->
                             {done, {ok, {true, {SubSpec, New}}}};
                         {_, Response, #{dstat := DStat}} ->
                             %% either the motion is pending or it failed, either way try again
-                            {retry, {10, seconds}, {wait, {Response, control, DStat}}}
+                            {retry, {30, seconds}, {wait, {Response, control, DStat}}}
                     end
             end;
         {ok, {retry, stopped}, _} ->
@@ -1090,10 +1092,10 @@ do_assign_pool({Sub, {Old, New}}, State) ->
     case loom:deliver(Sites, SubSpec, Probe, #{}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
-            {retry, {10, seconds}, {unreachable, {probe, SubSpec}, Reason}};
+            {retry, {30, seconds}, {unreachable, {probe, SubSpec}, Reason}};
         {ok, {wait, Reason}, #{dstat := #{node := Node}}} ->
             %% a change is pending
-            {retry, {10, seconds}, {wait, {Node, {assign, deliver}, Reason}}};
+            {retry, {30, seconds}, {wait, {Node, {assign, deliver}, Reason}}};
         {ok, {ok, {_, New}}, _} ->
             %% the value has already been set, all done
             {done, ok};
@@ -1109,7 +1111,7 @@ do_assign_pool({Sub, {Old, New}}, State) ->
                 {ok, {_, New}} ->
                     {done, ok};
                 Response ->
-                    {retry, {10, seconds}, {wait, {Node, {assign, rpc}, Response}}}
+                    {retry, {30, seconds}, {wait, {Node, {assign, rpc}, Response}}}
             end
     end.
 
@@ -1118,6 +1120,17 @@ do_assign_pool({Sub, {Old, New}}, State) ->
 
 do_transfer_name({_, {Same, Same}}, _) ->
     %% do nothing if there is no change
+    %% NB: there are two related problems with this:
+    %%  1. the manager is NOT the ultimate authority on if a sub has a name, the sub is
+    %%     yet we compare the aliases the manager sees, and do nothing if we think they are the same
+    %%     in reality, the name might not have successfully transferred to the sub
+    %%  2. the names are stored in a separate db, which can get ahead of the point
+    %%     e.g. if after we update the db and before the task finishes, the manager crashes
+    %%     this is a general problem with keeping control state in an auxiliary data structure
+    %%     this is dangerous if we are making decisions based off what is stored, like in this case
+    %%     we don't have this problem with the primary state, because we update it atomically (w/ point)
+    %%     one solution is to keep all state data in the db and use transactions (probably best)
+    %%     another is to track multiple versions manually per key in the db, and discard when safe
     {done, {false, Same}};
 do_transfer_name({[SubType, SubName], {undefined, New}}, State) ->
     %% just give control to the new subordinate, since there is no old one
@@ -1150,7 +1163,7 @@ do_micromanage(#{spec := Spec}, {id, SubType, SubId}, obtain, Path, Value, Retur
             do_micromanage(Spec, SubSpec, Sites, Path, Value, Return);
         {error, Reason, _} ->
             %% we couldn't talk to the manager, should only happen under heavy load
-            {retry, {10, seconds}, {unreachable, {obtain, Spec}, Reason}}
+            {retry, {30, seconds}, {unreachable, {obtain, Spec}, Reason}}
     end;
 do_micromanage(#{spec := Spec}, {id, SubType, SubId}, lookup, Path, Value, Return) ->
     case lookup({Spec, {id, SubType, SubId}}, #{}) of
@@ -1160,7 +1173,7 @@ do_micromanage(#{spec := Spec}, {id, SubType, SubId}, lookup, Path, Value, Retur
             do_micromanage(Spec, SubSpec, SubSites, Path, Value, Return);
         {error, Reason, _} ->
             %% we couldn't talk to the manager, should only happen under heavy load
-            {retry, {10, seconds}, {unreachable, {lookup, Spec}, Reason}}
+            {retry, {30, seconds}, {unreachable, {lookup, Spec}, Reason}}
     end;
 
 do_micromanage(_, SubSpec, Sites, Path, Value, Return) ->
@@ -1176,10 +1189,10 @@ do_micromanage(_, SubSpec, Sites, Path, Value, Return) ->
     case loom:deliver(Sites, SubSpec, Probe, #{}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
-            {retry, {10, seconds}, {unreachable, {probe, SubSpec}, Reason}};
+            {retry, {30, seconds}, {unreachable, {probe, SubSpec}, Reason}};
         {ok, {wait, Reason}, #{dstat := #{node := Node}}} ->
             %% a change is pending
-            {retry, {10, seconds}, {wait, {Node, {micro, deliver}, Reason}}};
+            {retry, {30, seconds}, {wait, {Node, {micro, deliver}, Reason}}};
         {ok, {ok, {_, Value}}, _} ->
             %% the value has already been set, all done
             {done, util:def(Return, {ok, {true, {SubSpec, Sites}}})};
@@ -1195,7 +1208,7 @@ do_micromanage(_, SubSpec, Sites, Path, Value, Return) ->
                 {ok, {_, Value}} ->
                     {done, util:def(Return, {ok, {true, {SubSpec, Sites}}})};
                 Response ->
-                    {retry, {10, seconds}, {wait, {Node, {micro, rpc}, Response}}}
+                    {retry, {30, seconds}, {wait, {Node, {micro, rpc}, Response}}}
             end
     end.
 
@@ -1211,7 +1224,7 @@ do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
     case loom:deliver(Sites, SubSpec, #{type => command, verb => lookup, path => [names]}, #{}) of
         {error, Reason, _} ->
             %% subordinate could not be contacted
-            {retry, {10, seconds}, {unreachable, {names, Sub}, Reason}};
+            {retry, {30, seconds}, {unreachable, {names, Sub}, Reason}};
         {ok, {retry, stopped}, _} ->
             %% subordinate stopped already, strange but possible
             {done, ok};
@@ -1219,10 +1232,10 @@ do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
             %% subordinate never started (or more likely stopped & wiped)
             %% treat the same as stopped, given what we know
             {done, ok};
-        {ok, {ok, {_, []}}, _} ->
+        {ok, {ok, {false, []}}, _} ->
             %% exit early if we never had any names
             do_control_sites({Sub, {Sites, []}}, State);
-        {ok, {ok, {_, Names}}, _} ->
+        {ok, {ok, {false, [_|_] = Names}}, _} ->
             %% get rid of all names, since even old ones may reference us in their stack
             %% try to unalias them all at once
             Batch = #{
@@ -1241,6 +1254,6 @@ do_remove_sub({Sub = [SubType, SubId], Sites}, State) ->
                     do_control_sites({Sub, {Sites, []}}, State);
                 _ ->
                     %% couldn't kill the aliases, retry
-                    {retry, {10, seconds}, inalienable}
+                    {retry, {30, seconds}, inalienable}
             end
     end.
