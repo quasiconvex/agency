@@ -1118,20 +1118,17 @@ do_assign_pool({Sub, {Old, New}}, State) ->
 %% name management
 %% ensure that names are transferred between the subordinates to reflect alias changes
 
-do_transfer_name({_, {Same, Same}}, _) ->
-    %% do nothing if there is no change
-    %% NB: there are two related problems with this:
-    %%  1. the manager is NOT the ultimate authority on if a sub has a name, the sub is
-    %%     yet we compare the aliases the manager sees, and do nothing if we think they are the same
-    %%     in reality, the name might not have successfully transferred to the sub
-    %%  2. the names are stored in a separate db, which can get ahead of the point
+do_transfer_name({[SubType, SubName], {Same, Same}}, State) ->
+    %% the manager is NOT the ultimate authority on if a sub has a name, the sub is
+    %% we must always try since the name might not have successfully transferred to the sub
+    %% NB: the names are stored in a separate db, which can get ahead of the point
     %%     e.g. if after we update the db and before the task finishes, the manager crashes
     %%     this is a general problem with keeping control state in an auxiliary data structure
     %%     this is dangerous if we are making decisions based off what is stored, like in this case
     %%     we don't have this problem with the primary state, because we update it atomically (w/ point)
     %%     one solution is to keep all state data in the db and use transactions (probably best)
     %%     another is to track multiple versions manually per key in the db, and discard when safe
-    {done, {false, Same}};
+    do_micromanage(State, {id, SubType, Same}, obtain, [names, SubName], true);
 do_transfer_name({[SubType, SubName], {undefined, New}}, State) ->
     %% just give control to the new subordinate, since there is no old one
     %% use obtain because this is how a sub gets initially 'created'
